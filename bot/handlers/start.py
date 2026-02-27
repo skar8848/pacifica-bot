@@ -402,7 +402,18 @@ async def nav_positions(callback: CallbackQuery):
         return
 
     if not positions:
-        text = "<b>📈 Positions</b>\n\nNo open positions."
+        from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📊 Trade", callback_data="nav:markets")],
+            [InlineKeyboardButton(text="◀️ Menu", callback_data="nav:menu")],
+        ])
+        await callback.message.edit_text(  # type: ignore
+            "<b>📈 Positions</b>\n\n"
+            "No open positions.\n\n"
+            "Open a trade to get started!",
+            reply_markup=kb,
+        )
+        return
     else:
         # Fetch mark prices and funding rates for all position symbols
         mark_prices: dict[str, float] = {}
