@@ -306,6 +306,7 @@ def settings_kb() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="🔑 Agent Wallet", callback_data="set:agent"),
             ],
             [
+                InlineKeyboardButton(text="🎟️ Claim Code", callback_data="set:claim"),
                 InlineKeyboardButton(text="📊 Network Info", callback_data="set:network"),
             ],
             [

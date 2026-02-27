@@ -43,6 +43,10 @@ class LinkStates(StatesGroup):
     waiting_wallet = State()
 
 
+class ClaimStates(StatesGroup):
+    waiting_code = State()
+
+
 async def _pub() -> PacificaClient:
     """Get a shared client for read-only public endpoints."""
     global _pub_client
@@ -79,15 +83,17 @@ async def cmd_start(message: Message):
     else:
         agent_pub = user["agent_wallet_public"]
 
+    app_url = "https://test-app.pacifica.fi" if PACIFICA_NETWORK == "testnet" else "https://app.pacifica.fi"
     await message.answer(
         f"<b>Welcome to Pacifica Trading Bot!</b>\n\n"
         f"Trade perpetual futures on Solana — right from Telegram.\n\n"
         f"Your agent wallet:\n<code>{agent_pub}</code>\n\n"
-        f"<b>Quick setup (3 steps):</b>\n\n"
-        f"1️⃣ Deposit on <a href='https://app.pacifica.fi'>Pacifica</a>\n"
-        f"2️⃣ Register the agent wallet above in your Pacifica settings\n"
-        f"3️⃣ Approve builder code <b>{BUILDER_CODE}</b>\n\n"
-        f"Then tap Link Wallet below to connect:",
+        f"<b>Quick setup (4 steps):</b>\n\n"
+        f"1️⃣ Claim a referral code (🎟️ Claim Code below)\n"
+        f"2️⃣ Deposit on <a href='{app_url}'>Pacifica</a>\n"
+        f"3️⃣ Register the agent wallet above in your Pacifica settings\n"
+        f"4️⃣ Approve builder code <b>{BUILDER_CODE}</b>\n\n"
+        f"Then tap 🔗 Link Wallet to connect:",
         reply_markup=settings_kb(),
         disable_web_page_preview=True,
     )
@@ -468,6 +474,68 @@ async def set_network(callback: CallbackQuery):
         f"Builder: <code>{BUILDER_CODE}</code>\n"
         f"Fee rate: {BUILDER_FEE_RATE}"
     )
+
+
+@router.callback_query(F.data == "set:claim")
+async def set_claim(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    user = await get_user(callback.from_user.id)
+    if not user or not user.get("pacifica_account"):
+        await callback.message.answer(  # type: ignore
+            "Link your wallet first (🔗 Link Wallet), then claim a code.",
+            reply_markup=settings_kb(),
+        )
+        return
+    await state.set_state(ClaimStates.waiting_code)
+    await callback.message.answer(  # type: ignore
+        "<b>🎟️ Claim Referral Code</b>\n\n"
+        "Paste your Pacifica referral/beta code below.\n"
+        "Get one from the Pacifica team:\n"
+        "• Discord: discord.gg/pacifica\n"
+        "• Telegram: @PacificaTGPortalBot\n"
+        "• Email: ops@pacifica.fi"
+    )
+
+
+@router.message(ClaimStates.waiting_code)
+async def msg_claim_code(message: Message, state: FSMContext):
+    code = (message.text or "").strip()
+    await state.clear()
+
+    if not code or len(code) > 16 or " " in code:
+        await message.answer(
+            "Invalid code format (alphanumeric, max 16 chars). Try again:",
+            reply_markup=settings_kb(),
+        )
+        return
+
+    tg_id = message.from_user.id  # type: ignore
+    user = await get_user(tg_id)
+    if not user or not user.get("pacifica_account"):
+        await message.answer("Link your wallet first.", reply_markup=settings_kb())
+        return
+
+    try:
+        from bot.models.user import build_client_from_user
+        client = build_client_from_user(user)
+        result = await client.claim_referral_code(code)
+        await client.close()
+
+        await message.answer(
+            f"<b>✅ Code Claimed!</b>\n\n"
+            f"Code: <code>{code}</code>\n"
+            f"You should now have beta/whitelist access.\n\n"
+            f"Try trading now!",
+            reply_markup=main_menu_kb(),
+        )
+    except PacificaAPIError as e:
+        await message.answer(
+            f"<b>❌ Claim Failed</b>\n\n{e}\n\n"
+            f"Make sure the code is valid and hasn't been used.",
+            reply_markup=settings_kb(),
+        )
+    except Exception as e:
+        await message.answer(f"Error: {e}", reply_markup=settings_kb())
 
 
 # ------------------------------------------------------------------

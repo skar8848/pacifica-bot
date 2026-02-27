@@ -230,6 +230,15 @@ class PacificaClient:
             self._build_request(header, payload),
         )
 
+    async def claim_referral_code(self, code: str) -> dict:
+        """Claim a referral code for beta/whitelist access."""
+        header = self._make_header("claim_referral_code")
+        payload = {"code": code}
+        return await self._post(
+            "/referral/user/code/claim",
+            self._build_request(header, payload),
+        )
+
     async def register_agent_wallet(self, agent_wallet_public: str) -> dict:
         header = self._make_header("register_agent_wallet")
         payload = {"agent_wallet": agent_wallet_public}
