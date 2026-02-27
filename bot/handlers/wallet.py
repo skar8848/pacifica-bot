@@ -151,7 +151,7 @@ async def wallet_faucet(callback: CallbackQuery):
 
 
 # ------------------------------------------------------------------
-# SOL Airdrop (devnet only)
+# SOL Faucet (devnet only)
 # ------------------------------------------------------------------
 
 @router.callback_query(F.data == "wallet:airdrop")
@@ -160,7 +160,7 @@ async def wallet_airdrop(callback: CallbackQuery):
         await callback.answer("Airdrop only available on devnet!", show_alert=True)
         return
 
-    await callback.answer("Requesting 1 SOL airdrop...")
+    await callback.answer("Requesting 1 SOL from faucet...")
     user = await get_user(callback.from_user.id)
     if not user or not user.get("pacifica_account"):
         await callback.answer("No wallet set up!", show_alert=True)
@@ -170,7 +170,7 @@ async def wallet_airdrop(callback: CallbackQuery):
         sig = await request_sol_airdrop(user["pacifica_account"], 1.0)
         url = explorer_url(sig)
         await callback.message.edit_text(  # type: ignore
-            f"<b>Airdrop Sent!</b>\n\n"
+            f"<b>SOL Faucet Success!</b>\n\n"
             f"<b>1 SOL</b> requested from devnet faucet.\n\n"
             f"Tx: <a href='{url}'>{sig[:16]}...</a>\n\n"
             f"It may take a few seconds to arrive.",
@@ -179,14 +179,14 @@ async def wallet_airdrop(callback: CallbackQuery):
         )
     except SolanaRPCError as e:
         await callback.message.edit_text(  # type: ignore
-            f"<b>Airdrop Failed</b>\n\n{e}\n\n"
+            f"<b>SOL Faucet Failed</b>\n\n{e}\n\n"
             f"Devnet faucets can be rate-limited. Try again later.",
             reply_markup=wallet_kb(0, 0),
         )
     except Exception as e:
         logger.error("Airdrop error: %s", e, exc_info=True)
         await callback.message.edit_text(  # type: ignore
-            f"<b>Airdrop Error</b>\n\n{e}",
+            f"<b>SOL Faucet Error</b>\n\n{e}",
             reply_markup=wallet_kb(0, 0),
         )
 

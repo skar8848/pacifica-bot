@@ -352,8 +352,8 @@ def wallet_kb(sol_balance: float = 0, usdc_balance: float = 0) -> InlineKeyboard
     if is_devnet():
         devnet_row = []
         if sol_balance < 0.05:
-            devnet_row.append(InlineKeyboardButton(text="☀️ SOL Airdrop", callback_data="wallet:airdrop"))
-        devnet_row.append(InlineKeyboardButton(text="🚰 Mint USDC", callback_data="wallet:faucet"))
+            devnet_row.append(InlineKeyboardButton(text="☀️ SOL Faucet", callback_data="wallet:airdrop"))
+        devnet_row.append(InlineKeyboardButton(text="🚰 USDC Faucet", callback_data="wallet:faucet"))
         if devnet_row:
             rows.append(devnet_row)
 
