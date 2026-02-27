@@ -222,11 +222,7 @@ def positions_kb(positions: list, mark_prices: dict | None = None) -> InlineKeyb
 
         rows.append([
             InlineKeyboardButton(
-                text=f"{direction} {symbol}{pnl_str}",
-                callback_data=f"pos:{symbol}",
-            ),
-            InlineKeyboardButton(
-                text="⚙️ Manage",
+                text=f"⚙️ {symbol}",
                 callback_data=f"pos:{symbol}",
             ),
             InlineKeyboardButton(
