@@ -404,13 +404,36 @@ async def nav_positions(callback: CallbackQuery):
     if not positions:
         text = "<b>📈 Positions</b>\n\nNo open positions."
     else:
-        if positions:
-            logger.info("Position sample: %s", positions[0])
+        # Fetch mark prices and funding rates for all position symbols
+        mark_prices: dict[str, float] = {}
+        funding_rates: dict[str, float] = {}
+        try:
+            pub = await _pub()
+            markets = await pub.get_markets_info()
+            funding_map = {m.get("symbol"): float(m.get("funding_rate", 0) or 0) for m in markets}
+            for pos in positions:
+                sym = pos.get("symbol", "")
+                if sym in funding_map:
+                    funding_rates[sym] = funding_map[sym]
+                try:
+                    trades = await pub.get_trades(sym, limit=1)
+                    if trades:
+                        mark_prices[sym] = float(trades[0]["price"])
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.debug("Failed to fetch mark prices: %s", e)
+
         text = "<b>📈 Positions</b>\n\n"
         for pos in positions:
-            text += fmt_position(pos) + "\n"
+            sym = pos.get("symbol", "")
+            text += fmt_position(
+                pos,
+                mark_price=mark_prices.get(sym),
+                funding_rate=funding_rates.get(sym),
+            ) + "\n"
 
-    await callback.message.edit_text(text, reply_markup=positions_kb(positions))  # type: ignore
+    await callback.message.edit_text(text, reply_markup=positions_kb(positions, mark_prices))  # type: ignore
 
 
 @router.callback_query(F.data == "nav:orders")

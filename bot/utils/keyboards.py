@@ -200,25 +200,37 @@ def confirm_trade_kb(side: str, symbol: str, amount: str, leverage: str) -> Inli
 # Positions
 # ------------------------------------------------------------------
 
-def positions_kb(positions: list) -> InlineKeyboardMarkup:
+def positions_kb(positions: list, mark_prices: dict | None = None) -> InlineKeyboardMarkup:
     rows = []
+    mark_prices = mark_prices or {}
     for pos in positions:
         symbol = pos.get("symbol", "?")
         side = pos.get("side", "bid")
         direction = "🟢" if side == "bid" else "🔴"
-        pnl_raw = pos.get("unrealized_pnl", pos.get("pnl", "0"))
-        try:
-            pnl_f = float(pnl_raw)
-            pnl_str = f"+${pnl_f:,.2f}" if pnl_f >= 0 else f"-${abs(pnl_f):,.2f}"
-        except (ValueError, TypeError):
-            pnl_str = str(pnl_raw)
+
+        # Calculate PnL from mark price
+        pnl_str = ""
+        mark = mark_prices.get(symbol)
+        if mark:
+            try:
+                amt = float(pos.get("amount", 0))
+                entry = float(pos.get("entry_price", 0))
+                pnl_f = (mark - entry) * amt if side == "bid" else (entry - mark) * amt
+                pnl_str = f"  +${pnl_f:,.2f}" if pnl_f >= 0 else f"  -${abs(pnl_f):,.2f}"
+            except (ValueError, TypeError):
+                pass
+
         rows.append([
             InlineKeyboardButton(
-                text=f"{direction} {symbol}  {pnl_str}",
+                text=f"{direction} {symbol}{pnl_str}",
                 callback_data=f"pos:{symbol}",
             ),
             InlineKeyboardButton(
-                text=f"❌ Close",
+                text="⚙️ Manage",
+                callback_data=f"pos:{symbol}",
+            ),
+            InlineKeyboardButton(
+                text="❌ Close",
                 callback_data=f"close_pos:{symbol}",
             ),
         ])

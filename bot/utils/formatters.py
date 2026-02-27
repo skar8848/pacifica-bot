@@ -17,49 +17,65 @@ def _fmt_price(val) -> str:
         return str(val)
 
 
-def fmt_position(pos: dict) -> str:
+def fmt_position(pos: dict, mark_price: float | None = None, funding_rate: float | None = None) -> str:
     symbol = pos.get("symbol", "?")
     side = pos.get("side", "?")
     amount = pos.get("amount", "0")
     entry = pos.get("entry_price", "?")
-    mark = pos.get("mark_price", "")
     liq = pos.get("liquidation_price", "?")
-    funding = pos.get("funding", "0")
-    upnl = pos.get("unrealized_pnl", pos.get("pnl", ""))
-    leverage = pos.get("leverage", "")
-    notional = pos.get("notional_value", pos.get("notional", ""))
+    funding_paid = pos.get("funding", "0")
     isolated = pos.get("isolated", False)
 
     direction = "LONG" if side == "bid" else "SHORT"
     emoji = "🟢" if side == "bid" else "🔴"
     mode = "Isolated" if isolated else "Cross"
 
-    text = f"{emoji} <b>{symbol}</b> {direction}"
-    if leverage:
-        text += f" ({leverage}x)"
-    text += "\n"
+    text = f"{emoji} <b>{symbol}</b> {direction}\n"
     text += f"  Size: {amount}\n"
-    if notional:
-        text += f"  Notional: ${_fmt_price(notional)}\n"
     text += f"  Entry: ${_fmt_price(entry)}\n"
-    if mark:
-        text += f"  Mark: ${_fmt_price(mark)}\n"
-    if upnl:
+
+    if mark_price:
+        text += f"  Mark: ${_fmt_price(mark_price)}\n"
+
+    # Liquidation price — hide if unrealistic
+    try:
+        liq_f = float(liq)
+        entry_f = float(entry)
+        if 0 < liq_f < entry_f * 10:
+            text += f"  Liq: ${_fmt_price(liq)}\n"
+    except (ValueError, TypeError):
+        pass
+
+    # Funding: paid / hourly rate / annualized
+    try:
+        fp = float(funding_paid)
+        funding_str = f"${fp:,.2f}"
+    except (ValueError, TypeError):
+        funding_str = str(funding_paid)
+
+    if funding_rate is not None:
+        hourly_pct = funding_rate * 100
+        annual_pct = funding_rate * 8760 * 100  # 24 * 365
+        text += f"  Funding: {funding_str} | {hourly_pct:.4f}%/h | {annual_pct:.1f}%/y\n"
+    else:
+        text += f"  Funding: {funding_str}\n"
+
+    # PnL — calculated from mark price
+    if mark_price:
         try:
-            pnl_f = float(upnl)
+            amt_f = float(amount)
+            entry_f = float(entry)
+            if side == "bid":
+                pnl_f = (mark_price - entry_f) * amt_f
+            else:
+                pnl_f = (entry_f - mark_price) * amt_f
             pnl_color = "🟢" if pnl_f >= 0 else "🔴"
             pnl_sign = "+" if pnl_f >= 0 else ""
             text += f"  PnL: {pnl_color} <b>{pnl_sign}${pnl_f:,.2f}</b>\n"
         except (ValueError, TypeError):
-            text += f"  PnL: {upnl}\n"
-    # Hide liquidation price if it's negative (cross mode artifact)
-    try:
-        liq_f = float(liq)
-        if liq_f > 0:
-            text += f"  Liq: ${_fmt_price(liq)}\n"
-    except (ValueError, TypeError):
-        text += f"  Liq: ${liq}\n"
-    text += f"  Funding: {funding} | {mode}\n"
+            pass
+
+    text += f"  {mode}\n"
     return text
 
 
