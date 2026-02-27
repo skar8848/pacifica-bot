@@ -1178,9 +1178,22 @@ async def cmd_update(message: Message):
         await message.answer("Admin only.")
         return
 
+    import os
+
+    # Detect Render (or other cloud) — no git available, auto-deploy handles updates
+    if os.environ.get("RENDER") or not os.path.isdir(
+        os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), ".git")
+    ):
+        await message.answer(
+            "<b>Auto-deploy enabled</b>\n\n"
+            "Updates are deployed automatically when code is pushed to main.\n"
+            "No manual update needed.",
+            reply_markup=main_menu_kb(),
+        )
+        return
+
     import subprocess
     import sys
-    import os
 
     await message.answer("Pulling latest code...")
 
