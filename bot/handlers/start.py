@@ -1081,3 +1081,49 @@ async def cmd_help(message: Message):
         "/positions — Open positions\n",
         reply_markup=main_menu_kb(),
     )
+
+
+# ------------------------------------------------------------------
+# /update — git pull + restart (admin only)
+# ------------------------------------------------------------------
+
+@router.message(Command("update"))
+async def cmd_update(message: Message):
+    from bot.config import ADMIN_IDS
+    tg_id = message.from_user.id  # type: ignore
+    if tg_id not in ADMIN_IDS:
+        await message.answer("Admin only.")
+        return
+
+    import subprocess
+    import sys
+    import os
+
+    await message.answer("Pulling latest code...")
+
+    try:
+        result = subprocess.run(
+            ["git", "pull", "origin", "main"],
+            capture_output=True, text=True, timeout=30,
+            cwd=os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+        )
+        output = result.stdout.strip() or result.stderr.strip() or "No output"
+
+        if result.returncode != 0:
+            await message.answer(f"<b>Git pull failed</b>\n\n<code>{output}</code>")
+            return
+
+        await message.answer(
+            f"<b>Updated!</b>\n\n<code>{output}</code>\n\n"
+            f"Restarting bot in 2 seconds..."
+        )
+
+        # Give Telegram time to deliver the message
+        import asyncio
+        await asyncio.sleep(2)
+
+        # Restart the process
+        os.execv(sys.executable, [sys.executable, "-m", "bot.main"])
+
+    except Exception as e:
+        await message.answer(f"<b>Update failed</b>\n\n{e}")

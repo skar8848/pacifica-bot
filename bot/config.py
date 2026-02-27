@@ -45,6 +45,7 @@ PACIFICA_REFERRAL_CODE = os.getenv("PACIFICA_REFERRAL_CODE", "Pacifica")
 
 # --- Bot ---
 BOT_USERNAME = os.getenv("BOT_USERNAME", "trident_pacifica_bot")
+ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "6994676998").split(",") if x.strip()]
 
 # --- Defaults ---
 DEFAULT_SLIPPAGE = "0.5"
