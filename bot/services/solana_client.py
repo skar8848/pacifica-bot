@@ -175,10 +175,32 @@ def _build_and_sign(keypair: Keypair, instructions: list[Instruction], blockhash
     return bytes(tx)
 
 
+def _create_ata_idempotent_ix(payer: Pubkey, owner: Pubkey, mint: Pubkey) -> Instruction:
+    """Build a createAssociatedTokenAccountIdempotent instruction.
+
+    This creates the ATA if it doesn't exist, or does nothing if it already exists.
+    Instruction index 1 = idempotent variant (won't fail if account exists).
+    """
+    ata = get_ata(owner, mint)
+    accounts = [
+        AccountMeta(payer, is_signer=True, is_writable=True),
+        AccountMeta(ata, is_signer=False, is_writable=True),
+        AccountMeta(owner, is_signer=False, is_writable=False),
+        AccountMeta(mint, is_signer=False, is_writable=False),
+        AccountMeta(SYS_PROGRAM, is_signer=False, is_writable=False),
+        AccountMeta(TOKEN_PROGRAM, is_signer=False, is_writable=False),
+    ]
+    # Instruction data: single byte 0x01 = CreateIdempotent
+    return Instruction(ASSOC_TOKEN_PROGRAM, bytes([1]), accounts)
+
+
 async def request_faucet(keypair: Keypair) -> str:
     """Mint 10,000 mock USDC via Pacifica's devnet faucet.
 
-    Instruction: discriminator only (no args), 8 accounts.
+    Prepends a createAssociatedTokenAccountIdempotent instruction
+    to ensure the user's USDC ATA exists before the faucet mints into it.
+
+    Faucet instruction: discriminator only (no args), 8 accounts.
     Account layout (verified from on-chain txs):
       [0] user (signer, writable)
       [1] user_account_pda (writable) — PDA([b"user_account", user], program)
@@ -193,7 +215,11 @@ async def request_faucet(keypair: Keypair) -> str:
     user_account = get_user_account_pda(user)
     user_ata = get_ata(user, USDC_MINT)
 
-    accounts = [
+    # 1) Create ATA if it doesn't exist (idempotent — safe to call even if exists)
+    create_ata_ix = _create_ata_idempotent_ix(user, user, USDC_MINT)
+
+    # 2) Faucet instruction
+    faucet_accounts = [
         AccountMeta(user, is_signer=True, is_writable=True),
         AccountMeta(user_account, is_signer=False, is_writable=True),
         AccountMeta(user_ata, is_signer=False, is_writable=True),
@@ -203,10 +229,10 @@ async def request_faucet(keypair: Keypair) -> str:
         AccountMeta(TOKEN_PROGRAM, is_signer=False, is_writable=False),
         AccountMeta(SYS_PROGRAM, is_signer=False, is_writable=False),
     ]
+    faucet_ix = Instruction(PACIFICA_PROGRAM, FAUCET_DISC, faucet_accounts)
 
-    ix = Instruction(PACIFICA_PROGRAM, FAUCET_DISC, accounts)
     blockhash = await get_latest_blockhash()
-    raw = _build_and_sign(keypair, [ix], blockhash)
+    raw = _build_and_sign(keypair, [create_ata_ix, faucet_ix], blockhash)
 
     sig = await send_tx(raw)
     logger.info("Faucet tx: %s", sig)
@@ -237,7 +263,10 @@ async def deposit_to_pacifica(keypair: Keypair, amount_usdc: float) -> str:
     amount_raw = int(amount_usdc * 10**USDC_DECIMALS)
     ix_data = DEPOSIT_DISC + struct.pack("<Q", amount_raw)
 
-    accounts = [
+    # Ensure user ATA exists before deposit
+    create_ata_ix = _create_ata_idempotent_ix(user, user, USDC_MINT)
+
+    deposit_accounts = [
         AccountMeta(user, is_signer=True, is_writable=True),
         AccountMeta(user_ata, is_signer=False, is_writable=True),
         AccountMeta(MINT_AUTHORITY, is_signer=False, is_writable=True),
@@ -250,9 +279,9 @@ async def deposit_to_pacifica(keypair: Keypair, amount_usdc: float) -> str:
         AccountMeta(PACIFICA_PROGRAM, is_signer=False, is_writable=False),
     ]
 
-    ix = Instruction(PACIFICA_PROGRAM, ix_data, accounts)
+    deposit_ix = Instruction(PACIFICA_PROGRAM, ix_data, deposit_accounts)
     blockhash = await get_latest_blockhash()
-    raw = _build_and_sign(keypair, [ix], blockhash)
+    raw = _build_and_sign(keypair, [create_ata_ix, deposit_ix], blockhash)
 
     sig = await send_tx(raw)
     logger.info("Deposit tx: %s (%.2f USDC)", sig, amount_usdc)
