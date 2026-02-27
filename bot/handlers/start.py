@@ -11,10 +11,10 @@ from aiogram.types import Message, CallbackQuery
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
-from database.db import get_user, create_user, update_user
+from database.db import get_user, create_user, update_user, get_or_create_ref_code, get_user_by_ref_code, count_referrals
 from bot.services.wallet_manager import generate_wallet, import_wallet
 from bot.services.pacifica_client import PacificaClient, PacificaAPIError
-from bot.config import BUILDER_CODE, BUILDER_FEE_RATE, PACIFICA_NETWORK
+from bot.config import BUILDER_CODE, BUILDER_FEE_RATE, PACIFICA_NETWORK, PACIFICA_REFERRAL_CODE, BOT_USERNAME
 from bot.utils.keyboards import (
     main_menu_kb,
     back_to_menu_kb,
@@ -47,10 +47,6 @@ class ImportStates(StatesGroup):
     waiting_private_key = State()
 
 
-class ClaimStates(StatesGroup):
-    waiting_code = State()
-
-
 async def _pub() -> PacificaClient:
     """Get a shared client for read-only public endpoints."""
     global _pub_client
@@ -65,9 +61,19 @@ async def _pub() -> PacificaClient:
 # ------------------------------------------------------------------
 
 @router.message(CommandStart())
-async def cmd_start(message: Message):
+async def cmd_start(message: Message, state: FSMContext):
     tg_id = message.from_user.id  # type: ignore
     user = await get_user(tg_id)
+
+    # Parse deeplink: /start ref_XXXXXX
+    args = (message.text or "").split()
+    ref_code = None
+    if len(args) > 1 and args[1].startswith("ref_"):
+        ref_code = args[1][4:]
+
+    # Store referral code in FSM so we can use it after wallet setup
+    if ref_code:
+        await state.update_data(ref_code=ref_code)
 
     if user and user.get("pacifica_account"):
         wallet = user["pacifica_account"]
@@ -78,7 +84,7 @@ async def cmd_start(message: Message):
         )
         return
 
-    # New or incomplete user — always show wallet setup
+    # New or incomplete user — show wallet setup
     await message.answer(
         f"<b>{BOT_NAME}</b> — Trade perps on Pacifica from Telegram.\n\n"
         f"Import your Solana wallet or generate a new one:",
@@ -102,10 +108,41 @@ async def onboard_import(callback: CallbackQuery, state: FSMContext):
     )
 
 
+async def _finish_wallet_setup(tg_id: int, pub: str, enc: str, state: FSMContext):
+    """Common logic after wallet import/generate: save, track referral, auto-claim Pacifica code."""
+    user = await get_user(tg_id)
+    if user:
+        await update_user(tg_id, pacifica_account=pub, agent_wallet_public=None, agent_wallet_encrypted=enc)
+    else:
+        user = await create_user(tg_id, None, enc)
+        await update_user(tg_id, pacifica_account=pub)
+
+    # Track referral if came via deeplink
+    fsm_data = await state.get_data()
+    ref_code = fsm_data.get("ref_code")
+    if ref_code:
+        referrer = await get_user_by_ref_code(ref_code)
+        if referrer and referrer["telegram_id"] != tg_id:
+            await update_user(tg_id, referred_by=referrer["telegram_id"])
+
+    # Auto-claim Pacifica beta code in background
+    if PACIFICA_REFERRAL_CODE:
+        try:
+            from bot.models.user import build_client_from_user
+            u = await get_user(tg_id)
+            client = build_client_from_user(u)
+            await client.claim_referral_code(PACIFICA_REFERRAL_CODE)
+            await client.close()
+            logger.info("Auto-claimed Pacifica code for user %s", tg_id)
+        except Exception as e:
+            logger.debug("Auto-claim failed (may already be claimed): %s", e)
+
+    await state.clear()
+
+
 @router.message(ImportStates.waiting_private_key)
 async def msg_import_key(message: Message, state: FSMContext):
     raw = (message.text or "").strip()
-    await state.clear()
 
     # Delete the message containing the private key for safety
     try:
@@ -132,20 +169,14 @@ async def msg_import_key(message: Message, state: FSMContext):
         return
 
     tg_id = message.from_user.id  # type: ignore
-    user = await get_user(tg_id)
-    if user:
-        await update_user(tg_id, pacifica_account=pub, agent_wallet_public=None, agent_wallet_encrypted=enc)
-    else:
-        user = await create_user(tg_id, None, enc)
-        await update_user(tg_id, pacifica_account=pub)
+    await _finish_wallet_setup(tg_id, pub, enc, state)
 
     await message.answer(
         f"<b>Wallet Imported!</b>\n\n"
         f"Address: <code>{pub}</code>\n\n"
         f"<b>Next steps:</b>\n"
-        f"1. Claim a referral code (⚙️ Settings → 🎟️ Claim Code)\n"
-        f"2. Deposit USDC on <a href='{APP_URL}'>Pacifica</a>\n"
-        f"3. Start trading!\n\n"
+        f"1. Deposit USDC on <a href='{APP_URL}'>Pacifica</a>\n"
+        f"2. Start trading!\n\n"
         f"Your private key has been deleted from chat.",
         reply_markup=main_menu_kb(),
         disable_web_page_preview=True,
@@ -153,7 +184,7 @@ async def msg_import_key(message: Message, state: FSMContext):
 
 
 @router.callback_query(F.data == "onboard:generate")
-async def onboard_generate(callback: CallbackQuery):
+async def onboard_generate(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     tg_id = callback.from_user.id
 
@@ -166,21 +197,15 @@ async def onboard_generate(callback: CallbackQuery):
         return
 
     pub, enc = generate_wallet()
-
-    if user:
-        await update_user(tg_id, pacifica_account=pub, agent_wallet_public=None, agent_wallet_encrypted=enc)
-    else:
-        user = await create_user(tg_id, None, enc)
-        await update_user(tg_id, pacifica_account=pub)
+    await _finish_wallet_setup(tg_id, pub, enc, state)
 
     await callback.message.edit_text(  # type: ignore
         f"<b>Wallet Generated!</b>\n\n"
         f"Address:\n<code>{pub}</code>\n\n"
         f"<b>Next steps:</b>\n"
         f"1. Send SOL to this address (for tx fees)\n"
-        f"2. Claim a referral code (⚙️ Settings → 🎟️ Claim Code)\n"
-        f"3. Deposit USDC on <a href='{APP_URL}'>Pacifica</a>\n"
-        f"4. Start trading!\n\n"
+        f"2. Deposit USDC on <a href='{APP_URL}'>Pacifica</a>\n"
+        f"3. Start trading!\n\n"
         f"Your private key is stored encrypted.",
         reply_markup=main_menu_kb(),
         disable_web_page_preview=True,
@@ -525,65 +550,30 @@ async def set_network(callback: CallbackQuery):
     )
 
 
-@router.callback_query(F.data == "set:claim")
-async def set_claim(callback: CallbackQuery, state: FSMContext):
+@router.callback_query(F.data == "set:referral")
+async def set_referral(callback: CallbackQuery):
     await callback.answer()
-    user = await get_user(callback.from_user.id)
+    tg_id = callback.from_user.id
+    user = await get_user(tg_id)
+
     if not user or not user.get("pacifica_account"):
         await callback.message.answer(  # type: ignore
             "Set up your wallet first — /start",
         )
         return
-    await state.set_state(ClaimStates.waiting_code)
+
+    ref_code = await get_or_create_ref_code(tg_id)
+    ref_link = f"https://t.me/{BOT_USERNAME}?start=ref_{ref_code}"
+    ref_count = await count_referrals(tg_id)
+
     await callback.message.answer(  # type: ignore
-        "<b>🎟️ Claim Referral Code</b>\n\n"
-        "Paste your Pacifica referral/beta code below.\n\n"
-        "Get one from the Pacifica team:\n"
-        "• Discord: discord.gg/pacifica\n"
-        "• Telegram: @PacificaTGPortalBot\n"
-        "• Email: ops@pacifica.fi"
+        f"<b>🔗 Your Referral</b>\n\n"
+        f"Share this link to earn from your friends' trades:\n\n"
+        f"<code>{ref_link}</code>\n\n"
+        f"Friends who join get reduced fees.\n"
+        f"You earn a share of their trading fees.\n\n"
+        f"Referrals: <b>{ref_count}</b>",
     )
-
-
-@router.message(ClaimStates.waiting_code)
-async def msg_claim_code(message: Message, state: FSMContext):
-    code = (message.text or "").strip()
-    await state.clear()
-
-    if not code or len(code) > 16 or " " in code:
-        await message.answer(
-            "Invalid code format (alphanumeric, max 16 chars). Try again:",
-            reply_markup=settings_kb(),
-        )
-        return
-
-    tg_id = message.from_user.id  # type: ignore
-    user = await get_user(tg_id)
-    if not user or not user.get("pacifica_account"):
-        await message.answer("Set up your wallet first — /start")
-        return
-
-    try:
-        from bot.models.user import build_client_from_user
-        client = build_client_from_user(user)
-        await client.claim_referral_code(code)
-        await client.close()
-
-        await message.answer(
-            f"<b>✅ Code Claimed!</b>\n\n"
-            f"Code: <code>{code}</code>\n"
-            f"You should now have beta/whitelist access.\n\n"
-            f"Try trading now!",
-            reply_markup=main_menu_kb(),
-        )
-    except PacificaAPIError as e:
-        await message.answer(
-            f"<b>❌ Claim Failed</b>\n\n{e}\n\n"
-            f"Make sure the code is valid.",
-            reply_markup=settings_kb(),
-        )
-    except Exception as e:
-        await message.answer(f"Error: {e}", reply_markup=settings_kb())
 
 
 # ------------------------------------------------------------------

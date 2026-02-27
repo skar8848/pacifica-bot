@@ -3,6 +3,8 @@ Async SQLite database layer.
 """
 
 import os
+import secrets
+import string
 import aiosqlite
 from bot.config import DATABASE_PATH
 
@@ -36,6 +38,8 @@ async def _init_tables(db: aiosqlite.Connection):
             agent_wallet_public TEXT,
             agent_wallet_encrypted TEXT,
             builder_approved INTEGER DEFAULT 0,
+            ref_code TEXT UNIQUE,
+            referred_by INTEGER,
             settings TEXT DEFAULT '{}',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
@@ -192,3 +196,39 @@ async def get_trade_history(telegram_id: int, limit: int = 20) -> list[dict]:
         (telegram_id, limit),
     ) as cursor:
         return [dict(r) for r in await cursor.fetchall()]
+
+
+# ------------------------------------------------------------------
+# Referrals
+# ------------------------------------------------------------------
+
+def _generate_ref_code() -> str:
+    chars = string.ascii_uppercase + string.digits
+    return "".join(secrets.choice(chars) for _ in range(6))
+
+
+async def get_or_create_ref_code(telegram_id: int) -> str:
+    user = await get_user(telegram_id)
+    if user and user.get("ref_code"):
+        return user["ref_code"]
+    code = _generate_ref_code()
+    await update_user(telegram_id, ref_code=code)
+    return code
+
+
+async def get_user_by_ref_code(code: str) -> dict | None:
+    db = await get_db()
+    async with db.execute(
+        "SELECT * FROM users WHERE ref_code = ?", (code,)
+    ) as cursor:
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+
+async def count_referrals(telegram_id: int) -> int:
+    db = await get_db()
+    async with db.execute(
+        "SELECT COUNT(*) FROM users WHERE referred_by = ?", (telegram_id,)
+    ) as cursor:
+        row = await cursor.fetchone()
+        return row[0] if row else 0

@@ -319,7 +319,7 @@ def settings_kb() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="🔄 Switch Wallet", callback_data="set:import"),
             ],
             [
-                InlineKeyboardButton(text="🎟️ Claim Code", callback_data="set:claim"),
+                InlineKeyboardButton(text="🔗 Referral", callback_data="set:referral"),
                 InlineKeyboardButton(text="📊 Network Info", callback_data="set:network"),
             ],
             [

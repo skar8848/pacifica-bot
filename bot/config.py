@@ -36,6 +36,12 @@ SOLANA_RPC_URL = os.getenv("SOLANA_RPC_URL", "https://api.mainnet-beta.solana.co
 # --- Database ---
 DATABASE_PATH = os.getenv("DATABASE_PATH", "database/pacifica_bot.db")
 
+# --- Pacifica access ---
+PACIFICA_REFERRAL_CODE = os.getenv("PACIFICA_REFERRAL_CODE", "DPEXZ83PUFZ7")
+
+# --- Bot ---
+BOT_USERNAME = os.getenv("BOT_USERNAME", "trident_pacifica_bot")
+
 # --- Defaults ---
 DEFAULT_SLIPPAGE = "0.5"
 DEFAULT_EXPIRY_WINDOW = 5_000
