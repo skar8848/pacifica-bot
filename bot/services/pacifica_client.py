@@ -40,6 +40,12 @@ class PacificaClient:
         self.builder_code = builder_code
         self._session: aiohttp.ClientSession | None = None
 
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        await self.close()
+
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
             self._session = aiohttp.ClientSession(
@@ -50,6 +56,7 @@ class PacificaClient:
     async def close(self):
         if self._session and not self._session.closed:
             await self._session.close()
+            self._session = None
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -236,6 +243,15 @@ class PacificaClient:
         payload = {"code": code}
         return await self._post(
             "/referral/user/code/claim",
+            self._build_request(header, payload),
+        )
+
+    async def request_withdraw(self, amount: str) -> dict:
+        """Request a USDC withdrawal from Pacifica."""
+        header = self._make_header("withdraw")
+        payload = {"amount": amount}
+        return await self._post(
+            "/account/withdraw",
             self._build_request(header, payload),
         )
 

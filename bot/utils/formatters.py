@@ -8,21 +8,39 @@ def fmt_position(pos: dict) -> str:
     side = pos.get("side", "?")
     amount = pos.get("amount", "0")
     entry = pos.get("entry_price", "?")
+    mark = pos.get("mark_price", "")
     liq = pos.get("liquidation_price", "?")
     funding = pos.get("funding", "0")
+    upnl = pos.get("unrealized_pnl", pos.get("pnl", ""))
+    leverage = pos.get("leverage", "")
+    notional = pos.get("notional_value", pos.get("notional", ""))
     isolated = pos.get("isolated", False)
 
     direction = "LONG" if side == "bid" else "SHORT"
     emoji = "🟢" if side == "bid" else "🔴"
     mode = "Isolated" if isolated else "Cross"
 
-    return (
-        f"{emoji} <b>{symbol}</b> {direction}\n"
-        f"  Size: {amount}\n"
-        f"  Entry: ${entry}\n"
-        f"  Liq: ${liq}\n"
-        f"  Funding: {funding} | {mode}\n"
-    )
+    text = f"{emoji} <b>{symbol}</b> {direction}"
+    if leverage:
+        text += f" ({leverage}x)"
+    text += "\n"
+    text += f"  Size: {amount}\n"
+    if notional:
+        text += f"  Notional: ${notional}\n"
+    text += f"  Entry: ${entry}\n"
+    if mark:
+        text += f"  Mark: ${mark}\n"
+    if upnl:
+        try:
+            pnl_f = float(upnl)
+            pnl_sign = "+" if pnl_f >= 0 else ""
+            pnl_emoji = "💚" if pnl_f >= 0 else "❤️"
+            text += f"  PnL: {pnl_emoji} {pnl_sign}{pnl_f:,.2f} USDC\n"
+        except (ValueError, TypeError):
+            text += f"  PnL: {upnl}\n"
+    text += f"  Liq: ${liq}\n"
+    text += f"  Funding: {funding} | {mode}\n"
+    return text
 
 
 def fmt_order(order: dict) -> str:

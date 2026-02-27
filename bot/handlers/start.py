@@ -11,7 +11,12 @@ from aiogram.types import Message, CallbackQuery
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
-from database.db import get_user, create_user, update_user, get_or_create_ref_code, get_user_by_ref_code, count_referrals
+from database.db import (
+    get_user, create_user, update_user,
+    get_or_create_ref_code, get_user_by_ref_code, count_referrals,
+    get_user_settings, set_user_setting,
+    get_active_alerts, add_price_alert, delete_alert,
+)
 from bot.services.wallet_manager import generate_wallet, import_wallet
 from bot.services.pacifica_client import PacificaClient, PacificaAPIError
 from bot.config import BUILDER_CODE, BUILDER_FEE_RATE, PACIFICA_NETWORK, PACIFICA_REFERRAL_CODE, BOT_USERNAME
@@ -22,8 +27,11 @@ from bot.utils.keyboards import (
     markets_all_kb,
     copy_menu_kb,
     settings_kb,
+    slippage_menu_kb,
+    leverage_menu_kb,
     positions_kb,
     onboarding_kb,
+    alerts_kb,
 )
 from bot.utils.formatters import (
     fmt_position,
@@ -40,11 +48,16 @@ router = Router()
 _pub_client: PacificaClient | None = None
 
 BOT_NAME = "Trident"
-APP_URL = "https://test-app.pacifica.fi" if PACIFICA_NETWORK == "testnet" else "https://app.pacifica.fi"
+APP_URL = "https://app.pacifica.fi" if PACIFICA_NETWORK == "mainnet" else "https://test-app.pacifica.fi"
 
 
 class ImportStates(StatesGroup):
     waiting_private_key = State()
+
+
+class AlertStates(StatesGroup):
+    waiting_symbol = State()
+    waiting_price = State()
 
 
 async def _pub() -> PacificaClient:
@@ -77,9 +90,33 @@ async def cmd_start(message: Message, state: FSMContext):
 
     if user and user.get("pacifica_account"):
         wallet = user["pacifica_account"]
+        # Quick account summary
+        summary = ""
+        try:
+            from bot.models.user import build_client_from_user
+            client = build_client_from_user(user)
+            try:
+                info = await client.get_account_info()
+                bal = info.get("balance", "0")
+                equity = info.get("account_equity", "0")
+                positions = await client.get_positions()
+                pos_count = len(positions)
+                summary = (
+                    f"\nBalance: <b>${bal}</b>\n"
+                    f"Equity: ${equity}\n"
+                    f"Open positions: {pos_count}\n"
+                )
+            except Exception:
+                pass
+            finally:
+                await client.close()
+        except Exception:
+            pass
+
         await message.answer(
             f"<b>{BOT_NAME}</b> — Pacifica Perps\n\n"
-            f"Wallet: <code>{wallet[:8]}...{wallet[-4:]}</code>",
+            f"Wallet: <code>{wallet[:8]}...{wallet[-4:]}</code>"
+            f"{summary}",
             reply_markup=main_menu_kb(),
         )
         return
@@ -125,17 +162,31 @@ async def _finish_wallet_setup(tg_id: int, pub: str, enc: str, state: FSMContext
         if referrer and referrer["telegram_id"] != tg_id:
             await update_user(tg_id, referred_by=referrer["telegram_id"])
 
-    # Auto-claim Pacifica beta code in background
-    if PACIFICA_REFERRAL_CODE:
+    # Auto-setup in background: claim referral + approve builder code
+    try:
+        from bot.models.user import build_client_from_user
+        u = await get_user(tg_id)
+        client = build_client_from_user(u)
+
+        # Claim Pacifica beta code
+        if PACIFICA_REFERRAL_CODE:
+            try:
+                await client.claim_referral_code(PACIFICA_REFERRAL_CODE)
+                logger.info("Auto-claimed Pacifica code for user %s", tg_id)
+            except Exception as e:
+                logger.debug("Auto-claim failed (may already be claimed): %s", e)
+
+        # Auto-approve builder code so fees work
         try:
-            from bot.models.user import build_client_from_user
-            u = await get_user(tg_id)
-            client = build_client_from_user(u)
-            await client.claim_referral_code(PACIFICA_REFERRAL_CODE)
-            await client.close()
-            logger.info("Auto-claimed Pacifica code for user %s", tg_id)
+            await client.approve_builder_code(BUILDER_CODE, BUILDER_FEE_RATE)
+            await update_user(tg_id, builder_approved=1)
+            logger.info("Auto-approved builder code '%s' for user %s", BUILDER_CODE, tg_id)
         except Exception as e:
-            logger.debug("Auto-claim failed (may already be claimed): %s", e)
+            logger.debug("Builder code approval failed (may need deposit first): %s", e)
+
+        await client.close()
+    except Exception as e:
+        logger.debug("Auto-setup failed: %s", e)
 
     await state.clear()
 
@@ -171,15 +222,13 @@ async def msg_import_key(message: Message, state: FSMContext):
     tg_id = message.from_user.id  # type: ignore
     await _finish_wallet_setup(tg_id, pub, enc, state)
 
+    from bot.utils.keyboards import wallet_kb
     await message.answer(
         f"<b>Wallet Imported!</b>\n\n"
         f"Address: <code>{pub}</code>\n\n"
-        f"<b>Next steps:</b>\n"
-        f"1. Deposit USDC on <a href='{APP_URL}'>Pacifica</a>\n"
-        f"2. Start trading!\n\n"
-        f"Your private key has been deleted from chat.",
-        reply_markup=main_menu_kb(),
-        disable_web_page_preview=True,
+        f"Your private key has been deleted from chat.\n\n"
+        f"<b>Next:</b> Open your Wallet to get USDC and deposit.",
+        reply_markup=wallet_kb(0, 0),
     )
 
 
@@ -199,16 +248,13 @@ async def onboard_generate(callback: CallbackQuery, state: FSMContext):
     pub, enc = generate_wallet()
     await _finish_wallet_setup(tg_id, pub, enc, state)
 
+    from bot.utils.keyboards import wallet_kb
     await callback.message.edit_text(  # type: ignore
         f"<b>Wallet Generated!</b>\n\n"
         f"Address:\n<code>{pub}</code>\n\n"
-        f"<b>Next steps:</b>\n"
-        f"1. Send SOL to this address (for tx fees)\n"
-        f"2. Deposit USDC on <a href='{APP_URL}'>Pacifica</a>\n"
-        f"3. Start trading!\n\n"
-        f"Your private key is stored encrypted.",
-        reply_markup=main_menu_kb(),
-        disable_web_page_preview=True,
+        f"Your private key is stored encrypted.\n\n"
+        f"<b>Next:</b> Get SOL + USDC from the wallet page below.",
+        reply_markup=wallet_kb(0, 0),
     )
 
 
@@ -331,8 +377,10 @@ async def nav_positions(callback: CallbackQuery):
     try:
         from bot.models.user import build_client_from_user
         client = build_client_from_user(user)
-        positions = await client.get_positions()
-        await client.close()
+        try:
+            positions = await client.get_positions()
+        finally:
+            await client.close()
     except PacificaAPIError as e:
         if "not found" in str(e).lower():
             await callback.message.edit_text(  # type: ignore
@@ -377,8 +425,10 @@ async def nav_orders(callback: CallbackQuery):
     try:
         from bot.models.user import build_client_from_user
         client = build_client_from_user(user)
-        orders = await client.get_open_orders()
-        await client.close()
+        try:
+            orders = await client.get_open_orders()
+        finally:
+            await client.close()
     except PacificaAPIError as e:
         if "not found" in str(e).lower():
             text = "<b>📋 Orders</b>\n\nNo orders (account not active on Pacifica yet)."
@@ -397,7 +447,76 @@ async def nav_orders(callback: CallbackQuery):
         for o in orders:
             text += fmt_order(o) + "\n"
 
-    await callback.message.edit_text(text, reply_markup=back_to_menu_kb())  # type: ignore
+    # Build keyboard with cancel buttons for each order
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    rows = []
+    for o in (orders or []):
+        oid = o.get("order_id", o.get("id", ""))
+        sym = o.get("symbol", "?")
+        if oid:
+            rows.append([
+                InlineKeyboardButton(
+                    text=f"❌ Cancel {sym} #{str(oid)[:8]}",
+                    callback_data=f"cancel_ord:{oid}:{sym}",
+                )
+            ])
+    if orders:
+        rows.append([
+            InlineKeyboardButton(text="❌ Cancel All", callback_data="cancel_all_orders"),
+        ])
+    rows.append([
+        InlineKeyboardButton(text="🔄 Refresh", callback_data="nav:orders"),
+        InlineKeyboardButton(text="◀️ Menu", callback_data="nav:menu"),
+    ])
+    kb = InlineKeyboardMarkup(inline_keyboard=rows)
+    await callback.message.edit_text(text, reply_markup=kb)  # type: ignore
+
+
+@router.callback_query(F.data.startswith("cancel_ord:"))
+async def cb_cancel_order(callback: CallbackQuery):
+    """Cancel a specific order."""
+    parts = callback.data.split(":")  # type: ignore
+    order_id, symbol = parts[1], parts[2]
+    user = await get_user(callback.from_user.id)
+    if not user or not user.get("pacifica_account"):
+        await callback.answer("Not linked")
+        return
+
+    await callback.answer(f"Cancelling order...")
+    try:
+        from bot.models.user import build_client_from_user
+        client = build_client_from_user(user)
+        try:
+            await client.cancel_order(order_id, symbol)
+        finally:
+            await client.close()
+        await callback.answer("Order cancelled!", show_alert=True)
+        # Refresh orders
+        await nav_orders(callback)
+    except Exception as e:
+        await callback.answer(f"Failed: {e}", show_alert=True)
+
+
+@router.callback_query(F.data == "cancel_all_orders")
+async def cb_cancel_all_orders(callback: CallbackQuery):
+    """Cancel all open orders."""
+    user = await get_user(callback.from_user.id)
+    if not user or not user.get("pacifica_account"):
+        await callback.answer("Not linked")
+        return
+
+    await callback.answer("Cancelling all orders...")
+    try:
+        from bot.models.user import build_client_from_user
+        client = build_client_from_user(user)
+        try:
+            await client.cancel_all_orders()
+        finally:
+            await client.close()
+        await callback.answer("All orders cancelled!", show_alert=True)
+        await nav_orders(callback)
+    except Exception as e:
+        await callback.answer(f"Failed: {e}", show_alert=True)
 
 
 @router.callback_query(F.data == "nav:balance")
@@ -414,8 +533,10 @@ async def nav_balance(callback: CallbackQuery):
     try:
         from bot.models.user import build_client_from_user
         client = build_client_from_user(user)
-        info = await client.get_account_info()
-        await client.close()
+        try:
+            info = await client.get_account_info()
+        finally:
+            await client.close()
     except PacificaAPIError as e:
         if "not found" in str(e).lower():
             text = (
@@ -448,8 +569,10 @@ async def nav_pnl(callback: CallbackQuery):
     try:
         from bot.models.user import build_client_from_user
         client = build_client_from_user(user)
-        trades = await client.get_trades_history()
-        await client.close()
+        try:
+            trades = await client.get_trades_history()
+        finally:
+            await client.close()
     except PacificaAPIError as e:
         if "not found" in str(e).lower():
             text = "<b>📉 PnL</b>\n\nNo trade history yet."
@@ -462,6 +585,62 @@ async def nav_pnl(callback: CallbackQuery):
         return
 
     await callback.message.edit_text(fmt_pnl(trades), reply_markup=back_to_menu_kb())  # type: ignore
+
+
+@router.callback_query(F.data == "nav:history")
+async def nav_history(callback: CallbackQuery):
+    """Show trade history from Pacifica API."""
+    await callback.answer("Loading history...")
+    user = await get_user(callback.from_user.id)
+
+    if not user or not user.get("pacifica_account"):
+        await callback.message.edit_text(  # type: ignore
+            "Set up your wallet first — /start", reply_markup=back_to_menu_kb(),
+        )
+        return
+
+    try:
+        from bot.models.user import build_client_from_user
+        client = build_client_from_user(user)
+        try:
+            orders = await client.get_orders_history(limit=20)
+        finally:
+            await client.close()
+    except PacificaAPIError as e:
+        if "not found" in str(e).lower():
+            text = "<b>📜 History</b>\n\nNo history yet."
+        else:
+            text = f"Error: {e}"
+        await callback.message.edit_text(text, reply_markup=back_to_menu_kb())  # type: ignore
+        return
+    except Exception as e:
+        await callback.message.edit_text(f"Error: {e}", reply_markup=back_to_menu_kb())  # type: ignore
+        return
+
+    if not orders:
+        text = "<b>📜 History</b>\n\nNo orders yet. Start trading!"
+    else:
+        text = "<b>📜 Order History</b>\n\n"
+        for o in orders[:15]:
+            symbol = o.get("symbol", "?")
+            side = o.get("side", "?")
+            amount = o.get("amount", "?")
+            price = o.get("price", o.get("fill_price", "?"))
+            otype = o.get("order_type", o.get("type", "?"))
+            status = o.get("status", "")
+            direction = "BUY" if side == "bid" else "SELL"
+            emoji = "🟢" if side == "bid" else "🔴"
+            text += f"{emoji} {symbol} {direction} {amount} @ ${price} ({otype}) {status}\n"
+
+    if len(text) > 4000:
+        text = text[:4000] + "\n..."
+
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔄 Refresh", callback_data="nav:history"),
+         InlineKeyboardButton(text="◀️ Menu", callback_data="nav:menu")],
+    ])
+    await callback.message.edit_text(text, reply_markup=kb)  # type: ignore
 
 
 @router.callback_query(F.data == "nav:copy")
@@ -495,7 +674,8 @@ async def nav_settings(callback: CallbackQuery):
             f"No wallet set up yet. Use /start to get started."
         )
 
-    await callback.message.edit_text(text, reply_markup=settings_kb(), disable_web_page_preview=True)  # type: ignore
+    user_settings = await get_user_settings(callback.from_user.id)
+    await callback.message.edit_text(text, reply_markup=settings_kb(user_settings), disable_web_page_preview=True)  # type: ignore
 
 
 # ------------------------------------------------------------------
@@ -550,6 +730,55 @@ async def set_network(callback: CallbackQuery):
     )
 
 
+@router.callback_query(F.data == "set:slippage_menu")
+async def set_slippage_menu(callback: CallbackQuery):
+    """Show slippage selection menu."""
+    await callback.answer()
+    user_settings = await get_user_settings(callback.from_user.id)
+    current = user_settings.get("slippage", "0.5")
+    await callback.message.edit_text(  # type: ignore
+        f"<b>Slippage Tolerance</b>\n\n"
+        f"Current: <b>{current}%</b>\n\n"
+        f"Higher slippage = faster fills but worse price.\n"
+        f"Lower slippage = better price but may fail.",
+        reply_markup=slippage_menu_kb(),
+    )
+
+
+@router.callback_query(F.data == "set:leverage_menu")
+async def set_leverage_menu(callback: CallbackQuery):
+    """Show default leverage selection menu."""
+    await callback.answer()
+    user_settings = await get_user_settings(callback.from_user.id)
+    current = user_settings.get("default_leverage", "10")
+    await callback.message.edit_text(  # type: ignore
+        f"<b>Default Leverage</b>\n\n"
+        f"Current: <b>{current}x</b>\n\n"
+        f"This is pre-selected when you open a new trade.\n"
+        f"You can always change it per-trade.",
+        reply_markup=leverage_menu_kb(),
+    )
+
+
+@router.callback_query(F.data.startswith("set:slippage:"))
+async def set_slippage(callback: CallbackQuery):
+    """Set slippage preference."""
+    val = callback.data.split(":")[2]  # type: ignore
+    await callback.answer(f"Slippage set to {val}%")
+    await set_user_setting(callback.from_user.id, "slippage", val)
+    # Go back to settings
+    await nav_settings(callback)
+
+
+@router.callback_query(F.data.startswith("set:deflev:"))
+async def set_default_leverage(callback: CallbackQuery):
+    """Set default leverage preference."""
+    val = callback.data.split(":")[2]  # type: ignore
+    await callback.answer(f"Default leverage set to {val}x")
+    await set_user_setting(callback.from_user.id, "default_leverage", val)
+    await nav_settings(callback)
+
+
 @router.callback_query(F.data == "set:referral")
 async def set_referral(callback: CallbackQuery):
     await callback.answer()
@@ -574,6 +803,111 @@ async def set_referral(callback: CallbackQuery):
         f"You earn a share of their trading fees.\n\n"
         f"Referrals: <b>{ref_count}</b>",
     )
+
+
+# ------------------------------------------------------------------
+# Price alerts
+# ------------------------------------------------------------------
+
+@router.callback_query(F.data == "nav:alerts")
+async def nav_alerts(callback: CallbackQuery):
+    await callback.answer()
+    alerts = await get_active_alerts(callback.from_user.id)
+    count = len(alerts)
+    await callback.message.edit_text(  # type: ignore
+        f"<b>🔔 Price Alerts</b> ({count} active)\n\n"
+        f"Get notified when a price crosses your target.\n"
+        f"Tap an alert to delete it.",
+        reply_markup=alerts_kb(alerts),
+    )
+
+
+@router.callback_query(F.data == "alert:new")
+async def alert_new(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await state.set_state(AlertStates.waiting_symbol)
+    await callback.message.edit_text(  # type: ignore
+        "<b>New Price Alert</b>\n\n"
+        "Type the symbol (e.g. BTC, ETH, SOL):",
+    )
+
+
+@router.message(AlertStates.waiting_symbol)
+async def msg_alert_symbol(message: Message, state: FSMContext):
+    symbol = (message.text or "").strip().upper()
+    if not symbol or len(symbol) > 10:
+        await message.answer("Invalid symbol. Try again (e.g. BTC):")
+        return
+    await state.update_data(alert_symbol=symbol)
+    await state.set_state(AlertStates.waiting_price)
+    await message.answer(
+        f"<b>Alert for {symbol}</b>\n\n"
+        f"Type the target price.\n"
+        f"Use <code>&gt;95000</code> for above or <code>&lt;90000</code> for below.\n"
+        f"If no prefix, defaults to 'above' if higher than current price.",
+    )
+
+
+@router.message(AlertStates.waiting_price)
+async def msg_alert_price(message: Message, state: FSMContext):
+    raw = (message.text or "").strip()
+    data = await state.get_data()
+    symbol = data["alert_symbol"]
+
+    # Parse direction
+    direction = None
+    if raw.startswith(">"):
+        direction = "above"
+        raw = raw[1:].strip()
+    elif raw.startswith("<"):
+        direction = "below"
+        raw = raw[1:].strip()
+
+    raw = raw.lstrip("$").replace(",", "")
+    try:
+        target = float(raw)
+        if target <= 0:
+            raise ValueError
+    except (ValueError, TypeError):
+        await message.answer("Invalid price. Try again (e.g. >95000 or <90000):")
+        return
+
+    # Auto-detect direction from current price if not specified
+    if not direction:
+        try:
+            from solders.keypair import Keypair
+            from bot.services.pacifica_client import PacificaClient
+            client = PacificaClient(account="public", keypair=Keypair())
+            trades = await client.get_trades(symbol, limit=1)
+            await client.close()
+            if trades:
+                current = float(trades[0]["price"])
+                direction = "above" if target > current else "below"
+            else:
+                direction = "above"
+        except Exception:
+            direction = "above"
+
+    await state.clear()
+    tg_id = message.from_user.id  # type: ignore
+    alert_id = await add_price_alert(tg_id, symbol, direction, target)
+
+    emoji = "📈" if direction == "above" else "📉"
+    await message.answer(
+        f"<b>✅ Alert Set!</b>\n\n"
+        f"{emoji} {symbol} {direction} ${target:,.2f}\n\n"
+        f"You'll be notified when the price crosses this level.",
+        reply_markup=main_menu_kb(),
+    )
+
+
+@router.callback_query(F.data.startswith("alert_del:"))
+async def alert_delete(callback: CallbackQuery):
+    alert_id = int(callback.data.split(":")[1])  # type: ignore
+    await delete_alert(alert_id, callback.from_user.id)
+    await callback.answer("Alert deleted")
+    # Refresh alerts list
+    await nav_alerts(callback)
 
 
 # ------------------------------------------------------------------
@@ -660,6 +994,66 @@ async def cmd_clear(message: Message, state: FSMContext):
 # /help
 # ------------------------------------------------------------------
 
+@router.message(Command("alert"))
+async def cmd_alert(message: Message, state: FSMContext):
+    """Shortcut: /alert BTC >95000"""
+    args = (message.text or "").split()
+    if len(args) < 3:
+        await message.answer(
+            "Usage: /alert <symbol> <price>\n\n"
+            "Examples:\n"
+            "/alert BTC >95000  (alert when above $95K)\n"
+            "/alert ETH <3000   (alert when below $3K)\n"
+            "/alert SOL 200     (auto-detect direction)",
+            reply_markup=main_menu_kb(),
+        )
+        return
+
+    symbol = args[1].upper()
+    raw_price = args[2]
+
+    direction = None
+    if raw_price.startswith(">"):
+        direction = "above"
+        raw_price = raw_price[1:]
+    elif raw_price.startswith("<"):
+        direction = "below"
+        raw_price = raw_price[1:]
+
+    try:
+        target = float(raw_price.lstrip("$").replace(",", ""))
+        if target <= 0:
+            raise ValueError
+    except (ValueError, TypeError):
+        await message.answer("Invalid price. Try /alert BTC >95000")
+        return
+
+    if not direction:
+        try:
+            from solders.keypair import Keypair
+            from bot.services.pacifica_client import PacificaClient
+            client = PacificaClient(account="public", keypair=Keypair())
+            trades = await client.get_trades(symbol, limit=1)
+            await client.close()
+            if trades:
+                current = float(trades[0]["price"])
+                direction = "above" if target > current else "below"
+            else:
+                direction = "above"
+        except Exception:
+            direction = "above"
+
+    tg_id = message.from_user.id  # type: ignore
+    await add_price_alert(tg_id, symbol, direction, target)
+
+    emoji = "📈" if direction == "above" else "📉"
+    await message.answer(
+        f"<b>✅ Alert Set!</b>\n\n"
+        f"{emoji} {symbol} {direction} ${target:,.2f}",
+        reply_markup=main_menu_kb(),
+    )
+
+
 @router.message(Command("help"))
 async def cmd_help(message: Message):
     await message.answer(
@@ -671,7 +1065,11 @@ async def cmd_help(message: Message):
         "<b>Quick trading:</b>\n"
         "/long BTC 100 10x\n"
         "/short ETH 200 20x\n"
-        "/close BTC\n\n"
+        "/close BTC — Close position\n"
+        "/closeall — Close all positions\n\n"
+        "<b>Alerts:</b>\n"
+        "/alert BTC &gt;95000 — Price above\n"
+        "/alert ETH &lt;3000 — Price below\n\n"
         "<b>Copy trading:</b>\n"
         "/copy &lt;wallet&gt; [0.5x] [max=500]\n"
         "/unfollow &lt;wallet&gt;\n\n"

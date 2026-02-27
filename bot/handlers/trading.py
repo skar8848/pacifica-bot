@@ -10,7 +10,7 @@ from aiogram.types import Message, CallbackQuery
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
-from database.db import get_user, log_trade
+from database.db import get_user, log_trade, get_user_settings
 from bot.models.user import build_client_from_user
 from bot.services.pacifica_client import PacificaAPIError
 from bot.utils.keyboards import (
@@ -18,6 +18,7 @@ from bot.utils.keyboards import (
     trade_amount_kb,
     trade_leverage_kb,
     confirm_trade_kb,
+    confirm_limit_kb,
     position_detail_kb,
     confirm_close_kb,
     close_all_kb,
@@ -35,6 +36,10 @@ class TradeStates(StatesGroup):
     waiting_custom_leverage = State()
     waiting_tp_price = State()
     waiting_sl_price = State()
+    waiting_limit_price = State()
+    waiting_limit_amount = State()
+    waiting_auto_tp = State()
+    waiting_auto_sl = State()
 
 
 async def _get_price(symbol: str) -> float | None:
@@ -54,6 +59,12 @@ async def _get_price(symbol: str) -> float | None:
 
 async def _get_max_leverage(symbol: str) -> int:
     """Fetch max leverage for a symbol."""
+    max_lev, _ = await _get_market_info(symbol)
+    return max_lev
+
+
+async def _get_market_info(symbol: str) -> tuple[int, str]:
+    """Fetch max leverage and tick_size for a symbol."""
     try:
         from solders.keypair import Keypair
         from bot.services.pacifica_client import PacificaClient
@@ -62,10 +73,10 @@ async def _get_max_leverage(symbol: str) -> int:
         await client.close()
         m = next((x for x in markets if x.get("symbol") == symbol), None)
         if m:
-            return int(m.get("max_leverage", 50))
+            return int(m.get("max_leverage", 50)), str(m.get("tick_size", "1"))
     except Exception:
         pass
-    return 50
+    return 50, "1"
 
 
 def _usdc_to_token(usdc_amount: float, price: float, lot_size: str = "0.00001") -> str:
@@ -371,12 +382,17 @@ async def cb_execute_trade(callback: CallbackQuery):
     notional = float(usdc_amount) * float(leverage)
     token_amount = _usdc_to_token(notional, price)
 
+    # Use user's slippage setting
+    settings = await get_user_settings(tg_id)
+    slippage = settings.get("slippage", "0.5")
+
     try:
         client = build_client_from_user(user)
         resp = await client.create_market_order(
             symbol=symbol,
             side=side,
             amount=token_amount,
+            slippage=slippage,
         )
         await client.close()
 
@@ -399,6 +415,302 @@ async def cb_execute_trade(callback: CallbackQuery):
     except PacificaAPIError as e:
         await callback.message.edit_text(  # type: ignore
             f"<b>❌ Order Failed</b>\n\n{e}",
+            reply_markup=market_detail_kb(symbol),
+        )
+
+
+# ------------------------------------------------------------------
+# Execute trade + auto TP/SL flow
+# ------------------------------------------------------------------
+
+@router.callback_query(F.data.startswith("exec_tpsl:"))
+async def cb_exec_trade_with_tpsl(callback: CallbackQuery, state: FSMContext):
+    """Execute trade then prompt for TP/SL."""
+    parts = callback.data.split(":")  # type: ignore
+    side, symbol, usdc_amount, leverage = parts[1], parts[2], parts[3], parts[4]
+
+    tg_id = callback.from_user.id
+    user = await get_user(tg_id)
+
+    if not user or not user.get("pacifica_account"):
+        await callback.answer("Link your account first!")
+        return
+
+    await callback.answer("Sending order...")
+
+    price = await _get_price(symbol)
+    if not price:
+        await callback.message.edit_text(  # type: ignore
+            f"<b>❌ Could not fetch price for {symbol}</b>",
+            reply_markup=market_detail_kb(symbol),
+        )
+        return
+
+    notional = float(usdc_amount) * float(leverage)
+    token_amount = _usdc_to_token(notional, price)
+
+    settings = await get_user_settings(tg_id)
+    slippage = settings.get("slippage", "0.5")
+
+    try:
+        client = build_client_from_user(user)
+        resp = await client.create_market_order(
+            symbol=symbol, side=side, amount=token_amount, slippage=slippage,
+        )
+        await client.close()
+
+        order_id = resp.get("order_id", resp.get("id", "?"))
+        fill_price = resp.get("fill_price", resp.get("price", str(price)))
+
+        await log_trade(tg_id, symbol, side, token_amount, str(fill_price), "market")
+
+        # Store trade info for TP/SL flow
+        await state.update_data(
+            tpsl_symbol=symbol,
+            tpsl_side=side,
+            tpsl_fill_price=fill_price,
+        )
+        await state.set_state(TradeStates.waiting_auto_tp)
+
+        direction = "🟢 LONG" if side == "bid" else "🔴 SHORT"
+        await callback.message.edit_text(  # type: ignore
+            f"<b>✅ Order Executed!</b>\n\n"
+            f"{direction} <b>{symbol}</b> @ ${fill_price}\n"
+            f"Size: ${usdc_amount} USDC | {leverage}x\n\n"
+            f"Now set your <b>Take Profit</b> price:\n"
+            f"(or type <code>skip</code> to skip)",
+        )
+    except PacificaAPIError as e:
+        await callback.message.edit_text(  # type: ignore
+            f"<b>❌ Order Failed</b>\n\n{e}",
+            reply_markup=market_detail_kb(symbol),
+        )
+
+
+@router.message(TradeStates.waiting_auto_tp)
+async def msg_auto_tp(message: Message, state: FSMContext):
+    raw = (message.text or "").strip()
+    data = await state.get_data()
+    symbol = data["tpsl_symbol"]
+    side = data["tpsl_side"]
+
+    if raw.lower() in ("skip", "s", "0", "no"):
+        await state.set_state(TradeStates.waiting_auto_sl)
+        await message.answer(
+            f"<b>TP skipped.</b>\n\n"
+            f"Now set your <b>Stop Loss</b> price for {symbol}:\n"
+            f"(or type <code>skip</code> to skip)",
+        )
+        return
+
+    tp_price = raw.lstrip("$").replace(",", "")
+    try:
+        float(tp_price)
+    except (ValueError, TypeError):
+        await message.answer("Invalid price. Enter a number or 'skip':")
+        return
+
+    # Set TP
+    tg_id = message.from_user.id  # type: ignore
+    user = await get_user(tg_id)
+    try:
+        client = build_client_from_user(user)
+        await client.set_tpsl(symbol=symbol, side=side, take_profit={"stop_price": tp_price})
+        await client.close()
+    except Exception as e:
+        await message.answer(f"TP failed: {e}")
+
+    await state.set_state(TradeStates.waiting_auto_sl)
+    await message.answer(
+        f"<b>✅ TP set @ ${tp_price}</b>\n\n"
+        f"Now set your <b>Stop Loss</b> price for {symbol}:\n"
+        f"(or type <code>skip</code> to skip)",
+    )
+
+
+@router.message(TradeStates.waiting_auto_sl)
+async def msg_auto_sl(message: Message, state: FSMContext):
+    raw = (message.text or "").strip()
+    data = await state.get_data()
+    symbol = data["tpsl_symbol"]
+    side = data["tpsl_side"]
+
+    await state.clear()
+
+    if raw.lower() in ("skip", "s", "0", "no"):
+        await message.answer(
+            f"<b>SL skipped. Trade complete!</b>",
+            reply_markup=main_menu_kb(),
+        )
+        return
+
+    sl_price = raw.lstrip("$").replace(",", "")
+    try:
+        float(sl_price)
+    except (ValueError, TypeError):
+        await message.answer(
+            "Invalid price. Trade placed without SL.",
+            reply_markup=main_menu_kb(),
+        )
+        return
+
+    tg_id = message.from_user.id  # type: ignore
+    user = await get_user(tg_id)
+    try:
+        client = build_client_from_user(user)
+        await client.set_tpsl(symbol=symbol, side=side, stop_loss={"stop_price": sl_price})
+        await client.close()
+    except Exception as e:
+        await message.answer(f"SL failed: {e}", reply_markup=main_menu_kb())
+        return
+
+    await message.answer(
+        f"<b>✅ SL set @ ${sl_price}</b>\n\n"
+        f"Trade complete with TP/SL protection!",
+        reply_markup=main_menu_kb(),
+    )
+
+
+# ------------------------------------------------------------------
+# Limit order flow: side → price → amount → leverage → confirm → exec
+# ------------------------------------------------------------------
+
+@router.callback_query(F.data.startswith("limit:"))
+async def cb_limit_side(callback: CallbackQuery, state: FSMContext):
+    """User picked limit buy or limit sell."""
+    parts = callback.data.split(":")  # type: ignore
+    side, symbol = parts[1], parts[2]
+    await callback.answer()
+
+    price = await _get_price(symbol)
+    price_str = f"\nCurrent price: ${price:,.2f}" if price else ""
+
+    direction = "📗 LIMIT BUY" if side == "bid" else "📕 LIMIT SELL"
+    await state.set_state(TradeStates.waiting_limit_price)
+    await state.update_data(side=side, symbol=symbol)
+
+    await callback.message.edit_text(  # type: ignore
+        f"<b>{direction} {symbol}</b>{price_str}\n\n"
+        f"Enter your limit price (e.g. 95000):",
+    )
+
+
+@router.message(TradeStates.waiting_limit_price)
+async def msg_limit_price(message: Message, state: FSMContext):
+    raw = (message.text or "").strip().lstrip("$").replace(",", "")
+    try:
+        float(raw)
+    except (ValueError, TypeError):
+        await message.answer("Invalid price. Enter a number (e.g. 95000):")
+        return
+
+    data = await state.get_data()
+    side = data["side"]
+    symbol = data["symbol"]
+
+    await state.set_state(TradeStates.waiting_limit_amount)
+    await state.update_data(limit_price=raw)
+
+    direction = "📗 LIMIT BUY" if side == "bid" else "📕 LIMIT SELL"
+    await message.answer(
+        f"<b>{direction} {symbol} @ ${raw}</b>\n\n"
+        f"Enter amount in USDC (e.g. 100):",
+    )
+
+
+@router.message(TradeStates.waiting_limit_amount)
+async def msg_limit_amount(message: Message, state: FSMContext):
+    raw = (message.text or "").strip().lstrip("$").replace(",", "")
+    try:
+        float(raw)
+    except (ValueError, TypeError):
+        await message.answer("Invalid amount. Enter a number in USDC:")
+        return
+
+    data = await state.get_data()
+    side = data["side"]
+    symbol = data["symbol"]
+    limit_price = data["limit_price"]
+    await state.clear()
+
+    # Get user default leverage
+    tg_id = message.from_user.id  # type: ignore
+    settings = await get_user_settings(tg_id)
+    leverage = settings.get("default_leverage", "10")
+
+    price_f = float(limit_price)
+    notional = float(raw) * float(leverage)
+    token_amount = _usdc_to_token(notional, price_f)
+
+    direction = "📗 LIMIT BUY" if side == "bid" else "📕 LIMIT SELL"
+    await message.answer(
+        f"<b>Confirm Limit Order</b>\n\n"
+        f"{direction} <b>{symbol}</b>\n"
+        f"Limit price: ${limit_price}\n"
+        f"Size: ${raw} USDC\n"
+        f"Leverage: {leverage}x\n"
+        f"Notional: ${notional:,.0f}\n"
+        f"Token amount: ~{token_amount} {symbol}\n"
+        f"Type: Limit (GTC)\n"
+        f"Builder fee: 0.05%",
+        reply_markup=confirm_limit_kb(side, symbol, raw, limit_price, leverage),
+    )
+
+
+@router.callback_query(F.data.startswith("exec_limit:"))
+async def cb_exec_limit(callback: CallbackQuery):
+    """Execute limit order."""
+    parts = callback.data.split(":")  # type: ignore
+    side, symbol, usdc_amount, limit_price, leverage = parts[1], parts[2], parts[3], parts[4], parts[5]
+
+    tg_id = callback.from_user.id
+    user = await get_user(tg_id)
+
+    if not user or not user.get("pacifica_account"):
+        await callback.answer("Link your account first!")
+        return
+
+    await callback.answer("Placing limit order...")
+
+    price_f = float(limit_price)
+    notional = float(usdc_amount) * float(leverage)
+    token_amount = _usdc_to_token(notional, price_f)
+
+    # Convert price to tick level (tick_level = price in integer form)
+    # Pacifica uses tick levels — we need market info to properly convert
+    try:
+        max_lev, tick_size = await _get_market_info(symbol)
+        tick_level = int(round(price_f / float(tick_size)))
+    except Exception:
+        tick_level = int(price_f)  # fallback
+
+    try:
+        client = build_client_from_user(user)
+        resp = await client.create_limit_order(
+            symbol=symbol,
+            side=side,
+            amount=token_amount,
+            tick_level=tick_level,
+        )
+        await client.close()
+
+        order_id = resp.get("order_id", resp.get("id", "?"))
+
+        await log_trade(tg_id, symbol, side, token_amount, limit_price, "limit")
+
+        direction = "📗 BUY" if side == "bid" else "📕 SELL"
+        await callback.message.edit_text(  # type: ignore
+            f"<b>✅ Limit Order Placed!</b>\n\n"
+            f"{direction} <b>{symbol}</b>\n"
+            f"Price: ${limit_price}\n"
+            f"Size: ${usdc_amount} USDC ({token_amount} {symbol})\n"
+            f"Leverage: {leverage}x\n"
+            f"Order ID: <code>{order_id}</code>",
+            reply_markup=main_menu_kb(),
+        )
+    except PacificaAPIError as e:
+        await callback.message.edit_text(  # type: ignore
+            f"<b>❌ Limit Order Failed</b>\n\n{e}",
             reply_markup=market_detail_kb(symbol),
         )
 
@@ -441,6 +753,59 @@ async def cb_position_detail(callback: CallbackQuery):
     )
 
 
+@router.callback_query(F.data.startswith("pclose:"))
+async def cb_partial_close(callback: CallbackQuery):
+    """Partial close: 25%, 50%, 75%."""
+    parts = callback.data.split(":")  # type: ignore
+    symbol, pct = parts[1], int(parts[2])
+    tg_id = callback.from_user.id
+    user = await get_user(tg_id)
+
+    if not user or not user.get("pacifica_account"):
+        await callback.answer("Not linked")
+        return
+
+    await callback.answer(f"Closing {pct}%...")
+
+    try:
+        client = build_client_from_user(user)
+        positions = await client.get_positions()
+        pos = next((p for p in positions if p.get("symbol", "").upper() == symbol.upper()), None)
+
+        if not pos:
+            await callback.message.edit_text(  # type: ignore
+                f"No position for {symbol}.", reply_markup=back_to_menu_kb(),
+            )
+            await client.close()
+            return
+
+        close_side = "ask" if pos.get("side") == "bid" else "bid"
+        full_amount = abs(float(pos.get("amount", pos.get("size", 0))))
+        partial_amount = round(full_amount * pct / 100, 8)
+
+        settings = await get_user_settings(tg_id)
+        slippage = settings.get("slippage", "0.5")
+
+        resp = await client.create_market_order(
+            symbol=symbol, side=close_side, amount=str(partial_amount),
+            reduce_only=True, slippage=slippage,
+        )
+        await client.close()
+
+        await log_trade(tg_id, symbol, close_side, str(partial_amount), order_type="partial_close")
+
+        await callback.message.edit_text(  # type: ignore
+            f"<b>✅ Closed {pct}% of {symbol}</b>\n\n"
+            f"Amount: {partial_amount} {symbol}\n"
+            f"Remaining: ~{full_amount - partial_amount:.8g} {symbol}",
+            reply_markup=main_menu_kb(),
+        )
+    except PacificaAPIError as e:
+        await callback.message.edit_text(  # type: ignore
+            f"<b>❌ Partial Close Failed</b>\n\n{e}", reply_markup=back_to_menu_kb(),
+        )
+
+
 @router.callback_query(F.data.startswith("close_pos:"))
 async def cb_close_pos(callback: CallbackQuery):
     symbol = callback.data.split(":")[1]  # type: ignore
@@ -478,8 +843,12 @@ async def cb_exec_close(callback: CallbackQuery):
         close_side = "ask" if pos.get("side") == "bid" else "bid"
         amount = str(abs(float(pos.get("amount", pos.get("size", 0)))))
 
+        settings = await get_user_settings(tg_id)
+        slippage = settings.get("slippage", "0.5")
+
         resp = await client.create_market_order(
-            symbol=symbol, side=close_side, amount=amount, reduce_only=True,
+            symbol=symbol, side=close_side, amount=amount,
+            reduce_only=True, slippage=slippage,
         )
         await client.close()
 
@@ -510,6 +879,9 @@ async def cb_exec_closeall(callback: CallbackQuery):
         client = build_client_from_user(user)
         positions = await client.get_positions()
 
+        settings = await get_user_settings(tg_id)
+        slippage = settings.get("slippage", "0.5")
+
         results = []
         for pos in positions:
             symbol = pos.get("symbol", "?")
@@ -517,7 +889,8 @@ async def cb_exec_closeall(callback: CallbackQuery):
             amount = str(abs(float(pos.get("amount", pos.get("size", 0)))))
             try:
                 await client.create_market_order(
-                    symbol=symbol, side=close_side, amount=amount, reduce_only=True,
+                    symbol=symbol, side=close_side, amount=amount,
+                    reduce_only=True, slippage=slippage,
                 )
                 results.append(f"✅ {symbol}")
                 await log_trade(tg_id, symbol, close_side, amount, order_type="market_close")
@@ -749,4 +1122,71 @@ async def cmd_markets(message: Message):
     await message.answer(
         f"<b>📊 Markets</b> ({len(markets)} pairs)\n\nTap to trade:",
         reply_markup=markets_kb(markets, prices),
+    )
+
+
+# ------------------------------------------------------------------
+# Quick ticker lookup — typing just "BTC" shows the market detail
+# ------------------------------------------------------------------
+
+# Known symbols cache (populated lazily)
+_known_symbols: set[str] | None = None
+
+
+async def _get_known_symbols() -> set[str]:
+    global _known_symbols
+    if _known_symbols is None:
+        try:
+            from solders.keypair import Keypair
+            from bot.services.pacifica_client import PacificaClient
+            client = PacificaClient(account="public", keypair=Keypair())
+            markets = await client.get_markets_info()
+            await client.close()
+            _known_symbols = {m.get("symbol", "").upper() for m in markets}
+        except Exception:
+            _known_symbols = set()
+    return _known_symbols
+
+
+@router.message()
+async def msg_ticker_lookup(message: Message, state: FSMContext):
+    """Catch-all: if user types a known ticker, show market detail."""
+    # Don't interfere with FSM states
+    current_state = await state.get_state()
+    if current_state:
+        return
+
+    text = (message.text or "").strip().upper()
+    # Only match single words that look like tickers (2-10 chars, letters only)
+    if not text or not text.isalpha() or len(text) < 2 or len(text) > 10:
+        return
+
+    symbols = await _get_known_symbols()
+    if text not in symbols:
+        return
+
+    # Show market detail
+    mark = "?"
+    max_lev = "?"
+    try:
+        from solders.keypair import Keypair
+        from bot.services.pacifica_client import PacificaClient
+        client = PacificaClient(account="public", keypair=Keypair())
+        trades = await client.get_trades(text, limit=1)
+        if trades:
+            mark = trades[0].get("price", "?")
+        markets = await client.get_markets_info()
+        m = next((x for x in markets if x.get("symbol") == text), None)
+        if m:
+            max_lev = m.get("max_leverage", "?")
+        await client.close()
+    except Exception:
+        pass
+
+    await message.answer(
+        f"<b>{text}</b>\n\n"
+        f"Price: <b>${mark}</b>\n"
+        f"Max leverage: {max_lev}x\n\n"
+        f"What do you want to do?",
+        reply_markup=market_detail_kb(text),
     )

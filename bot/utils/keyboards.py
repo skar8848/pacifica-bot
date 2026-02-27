@@ -4,6 +4,8 @@ Inline keyboards — full interactive UX.
 
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
+from bot.services.solana_client import is_devnet
+
 
 # ------------------------------------------------------------------
 # Main menu (shown after /start and accessible everywhere)
@@ -14,6 +16,7 @@ def main_menu_kb() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [
                 InlineKeyboardButton(text="📊 Trade", callback_data="nav:markets"),
+                InlineKeyboardButton(text="💳 Wallet", callback_data="nav:wallet"),
             ],
             [
                 InlineKeyboardButton(text="📈 Positions", callback_data="nav:positions"),
@@ -21,10 +24,13 @@ def main_menu_kb() -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton(text="💰 Balance", callback_data="nav:balance"),
-                InlineKeyboardButton(text="📉 PnL", callback_data="nav:pnl"),
+                InlineKeyboardButton(text="📜 History", callback_data="nav:history"),
             ],
             [
                 InlineKeyboardButton(text="👥 Copy Trading", callback_data="nav:copy"),
+                InlineKeyboardButton(text="🔔 Alerts", callback_data="nav:alerts"),
+            ],
+            [
                 InlineKeyboardButton(text="⚙️ Settings", callback_data="nav:settings"),
             ],
         ]
@@ -45,13 +51,11 @@ def back_to_menu_kb() -> InlineKeyboardMarkup:
 
 def markets_kb(markets: list, prices: dict | None = None) -> InlineKeyboardMarkup:
     """Build market list from /info data. Optional prices dict {symbol: price_str}."""
-    # Show top markets first (by max_leverage as proxy for popularity)
     top_symbols = ["BTC", "ETH", "SOL", "TRUMP", "HYPE", "DOGE", "XRP", "SUI", "LINK", "AVAX"]
     prices = prices or {}
 
     rows = []
     shown = set()
-    # Top markets first
     for sym in top_symbols:
         m = next((x for x in markets if x.get("symbol") == sym), None)
         if m:
@@ -65,7 +69,6 @@ def markets_kb(markets: list, prices: dict | None = None) -> InlineKeyboardMarku
             ])
             shown.add(sym)
 
-    # "More markets" button for the rest
     remaining = len(markets) - len(shown)
     if remaining > 0:
         rows.append([
@@ -105,6 +108,10 @@ def market_detail_kb(symbol: str) -> InlineKeyboardMarkup:
             [
                 InlineKeyboardButton(text="🟢 Long", callback_data=f"trade:long:{symbol}"),
                 InlineKeyboardButton(text="🔴 Short", callback_data=f"trade:short:{symbol}"),
+            ],
+            [
+                InlineKeyboardButton(text="📗 Limit Buy", callback_data=f"limit:bid:{symbol}"),
+                InlineKeyboardButton(text="📕 Limit Sell", callback_data=f"limit:ask:{symbol}"),
             ],
             [
                 InlineKeyboardButton(text="📊 Orderbook", callback_data=f"ob:{symbol}"),
@@ -150,7 +157,6 @@ def trade_leverage_kb(symbol: str, side: str, amount: str, max_lev: int = 50) ->
     available = [x for x in presets if x <= max_lev]
 
     rows = []
-    # Split into rows of 3
     for i in range(0, len(available), 3):
         row = [
             InlineKeyboardButton(
@@ -175,6 +181,12 @@ def confirm_trade_kb(side: str, symbol: str, amount: str, leverage: str) -> Inli
                 InlineKeyboardButton(
                     text="✅ Confirm & Send",
                     callback_data=f"exec:{side}:{symbol}:{amount}:{leverage}",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="✅ Send + Set TP/SL",
+                    callback_data=f"exec_tpsl:{side}:{symbol}:{amount}:{leverage}",
                 ),
             ],
             [
@@ -218,11 +230,32 @@ def position_detail_kb(symbol: str, side: str) -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="🛑 Set SL", callback_data=f"set_sl:{symbol}"),
             ],
             [
-                InlineKeyboardButton(text="❌ Close Position", callback_data=f"close_pos:{symbol}"),
+                InlineKeyboardButton(text="Close 25%", callback_data=f"pclose:{symbol}:25"),
+                InlineKeyboardButton(text="Close 50%", callback_data=f"pclose:{symbol}:50"),
+                InlineKeyboardButton(text="Close 75%", callback_data=f"pclose:{symbol}:75"),
+            ],
+            [
+                InlineKeyboardButton(text="❌ Close 100%", callback_data=f"close_pos:{symbol}"),
             ],
             [
                 InlineKeyboardButton(text="◀️ Positions", callback_data="nav:positions"),
                 InlineKeyboardButton(text="◀️ Menu", callback_data="nav:menu"),
+            ],
+        ]
+    )
+
+
+def confirm_limit_kb(side: str, symbol: str, amount: str, price: str, leverage: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="✅ Place Limit Order",
+                    callback_data=f"exec_limit:{side}:{symbol}:{amount}:{price}:{leverage}",
+                ),
+            ],
+            [
+                InlineKeyboardButton(text="❌ Cancel", callback_data=f"market:{symbol}"),
             ],
         ]
     )
@@ -269,7 +302,7 @@ def copy_menu_kb() -> InlineKeyboardMarkup:
 
 
 def copy_settings_kb(wallet: str) -> InlineKeyboardMarkup:
-    w = wallet[:8]  # shorten for callback data limit (64 bytes)
+    w = wallet[:8]
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
@@ -308,15 +341,137 @@ def onboarding_kb() -> InlineKeyboardMarkup:
 
 
 # ------------------------------------------------------------------
+# Wallet dashboard
+# ------------------------------------------------------------------
+
+def wallet_kb(sol_balance: float = 0, usdc_balance: float = 0) -> InlineKeyboardMarkup:
+    """Wallet action buttons. Shows devnet-only buttons when appropriate."""
+    rows = []
+
+    # Devnet-only actions
+    if is_devnet():
+        devnet_row = []
+        if sol_balance < 0.05:
+            devnet_row.append(InlineKeyboardButton(text="☀️ SOL Airdrop", callback_data="wallet:airdrop"))
+        devnet_row.append(InlineKeyboardButton(text="🚰 Mint USDC", callback_data="wallet:faucet"))
+        if devnet_row:
+            rows.append(devnet_row)
+
+    # Deposit / Withdraw
+    rows.append([
+        InlineKeyboardButton(text="💰 Deposit", callback_data="wallet:deposit"),
+        InlineKeyboardButton(text="📤 Withdraw", callback_data="wallet:withdraw"),
+    ])
+
+    # Utility
+    rows.append([
+        InlineKeyboardButton(text="🔑 Export Key", callback_data="wallet:export"),
+        InlineKeyboardButton(text="🔄 Refresh", callback_data="wallet:refresh"),
+    ])
+
+    rows.append([InlineKeyboardButton(text="◀️ Menu", callback_data="nav:menu")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def wallet_deposit_kb(usdc_balance: float) -> InlineKeyboardMarkup:
+    """Deposit amount selection buttons."""
+    rows = []
+
+    # Quick amounts (only show if user has enough)
+    quick = [100, 500, 1000, 5000]
+    row = []
+    for amt in quick:
+        if usdc_balance >= amt:
+            row.append(InlineKeyboardButton(text=f"${amt:,}", callback_data=f"dep:{amt}"))
+        if len(row) == 3:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+
+    # All + Custom
+    rows.append([
+        InlineKeyboardButton(text=f"All (${usdc_balance:,.0f})", callback_data=f"dep:{int(usdc_balance)}"),
+        InlineKeyboardButton(text="Custom ✏️", callback_data="dep:custom"),
+    ])
+
+    rows.append([
+        InlineKeyboardButton(text="◀️ Wallet", callback_data="nav:wallet"),
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def wallet_withdraw_kb(pac_balance: float) -> InlineKeyboardMarkup:
+    """Withdraw amount selection buttons."""
+    rows = []
+
+    quick = [100, 500, 1000, 5000]
+    row = []
+    for amt in quick:
+        if pac_balance >= amt:
+            row.append(InlineKeyboardButton(text=f"${amt:,}", callback_data=f"wdraw:{amt}"))
+        if len(row) == 3:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+
+    rows.append([
+        InlineKeyboardButton(text=f"All (${pac_balance:,.0f})", callback_data=f"wdraw:{int(pac_balance)}"),
+        InlineKeyboardButton(text="Custom ✏️", callback_data="wdraw:custom"),
+    ])
+
+    rows.append([
+        InlineKeyboardButton(text="◀️ Wallet", callback_data="nav:wallet"),
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+# ------------------------------------------------------------------
+# Price alerts
+# ------------------------------------------------------------------
+
+def alerts_kb(alerts: list) -> InlineKeyboardMarkup:
+    rows = []
+    for a in alerts[:10]:
+        symbol = a.get("symbol", "?")
+        direction = "above" if a.get("direction") == "above" else "below"
+        price = a.get("target_price", "?")
+        alert_id = a.get("id", 0)
+        emoji = "📈" if direction == "above" else "📉"
+        rows.append([
+            InlineKeyboardButton(
+                text=f"{emoji} {symbol} {direction} ${price}",
+                callback_data=f"alert_del:{alert_id}",
+            )
+        ])
+    if not rows:
+        rows.append([InlineKeyboardButton(text="No alerts — set one!", callback_data="nav:markets")])
+    rows.append([
+        InlineKeyboardButton(text="➕ New Alert", callback_data="alert:new"),
+        InlineKeyboardButton(text="◀️ Menu", callback_data="nav:menu"),
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+# ------------------------------------------------------------------
 # Settings
 # ------------------------------------------------------------------
 
-def settings_kb() -> InlineKeyboardMarkup:
+def settings_kb(settings: dict | None = None) -> InlineKeyboardMarkup:
+    s = settings or {}
+    slip = s.get("slippage", "0.5")
+    lev = s.get("default_leverage", "10")
+
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(text="💳 My Wallet", callback_data="set:wallet"),
                 InlineKeyboardButton(text="🔄 Switch Wallet", callback_data="set:import"),
+            ],
+            [
+                InlineKeyboardButton(text=f"Slippage: {slip}%", callback_data="set:slippage_menu"),
+                InlineKeyboardButton(text=f"Leverage: {lev}x", callback_data="set:leverage_menu"),
             ],
             [
                 InlineKeyboardButton(text="🔗 Referral", callback_data="set:referral"),
@@ -325,5 +480,42 @@ def settings_kb() -> InlineKeyboardMarkup:
             [
                 InlineKeyboardButton(text="◀️ Menu", callback_data="nav:menu"),
             ],
+        ]
+    )
+
+
+def slippage_menu_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="0.1%", callback_data="set:slippage:0.1"),
+                InlineKeyboardButton(text="0.3%", callback_data="set:slippage:0.3"),
+                InlineKeyboardButton(text="0.5%", callback_data="set:slippage:0.5"),
+                InlineKeyboardButton(text="1%", callback_data="set:slippage:1"),
+            ],
+            [
+                InlineKeyboardButton(text="2%", callback_data="set:slippage:2"),
+                InlineKeyboardButton(text="3%", callback_data="set:slippage:3"),
+                InlineKeyboardButton(text="5%", callback_data="set:slippage:5"),
+            ],
+            [InlineKeyboardButton(text="◀️ Settings", callback_data="nav:settings")],
+        ]
+    )
+
+
+def leverage_menu_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="1x", callback_data="set:deflev:1"),
+                InlineKeyboardButton(text="2x", callback_data="set:deflev:2"),
+                InlineKeyboardButton(text="5x", callback_data="set:deflev:5"),
+            ],
+            [
+                InlineKeyboardButton(text="10x", callback_data="set:deflev:10"),
+                InlineKeyboardButton(text="20x", callback_data="set:deflev:20"),
+                InlineKeyboardButton(text="50x", callback_data="set:deflev:50"),
+            ],
+            [InlineKeyboardButton(text="◀️ Settings", callback_data="nav:settings")],
         ]
     )

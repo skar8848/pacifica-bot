@@ -68,6 +68,17 @@ async def _init_tables(db: aiosqlite.Connection):
             client_order_id TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
+
+        CREATE TABLE IF NOT EXISTS price_alerts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            telegram_id INTEGER REFERENCES users(telegram_id),
+            symbol TEXT NOT NULL,
+            direction TEXT NOT NULL,  -- 'above' or 'below'
+            target_price REAL NOT NULL,
+            active INTEGER DEFAULT 1,
+            triggered INTEGER DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
         """
     )
     await db.commit()
@@ -199,6 +210,31 @@ async def get_trade_history(telegram_id: int, limit: int = 20) -> list[dict]:
 
 
 # ------------------------------------------------------------------
+# User settings helpers
+# ------------------------------------------------------------------
+
+import json as _json
+
+
+async def get_user_settings(telegram_id: int) -> dict:
+    """Get parsed user settings dict."""
+    user = await get_user(telegram_id)
+    if not user:
+        return {}
+    try:
+        return _json.loads(user.get("settings") or "{}")
+    except Exception:
+        return {}
+
+
+async def set_user_setting(telegram_id: int, key: str, value):
+    """Update a single setting key."""
+    settings = await get_user_settings(telegram_id)
+    settings[key] = value
+    await update_user(telegram_id, settings=_json.dumps(settings))
+
+
+# ------------------------------------------------------------------
 # Referrals
 # ------------------------------------------------------------------
 
@@ -223,6 +259,52 @@ async def get_user_by_ref_code(code: str) -> dict | None:
     ) as cursor:
         row = await cursor.fetchone()
         return dict(row) if row else None
+
+
+# ------------------------------------------------------------------
+# Price alerts
+# ------------------------------------------------------------------
+
+async def add_price_alert(
+    telegram_id: int, symbol: str, direction: str, target_price: float,
+) -> int:
+    db = await get_db()
+    cursor = await db.execute(
+        """INSERT INTO price_alerts (telegram_id, symbol, direction, target_price)
+           VALUES (?, ?, ?, ?)""",
+        (telegram_id, symbol, direction, target_price),
+    )
+    await db.commit()
+    return cursor.lastrowid  # type: ignore
+
+
+async def get_active_alerts(telegram_id: int | None = None) -> list[dict]:
+    db = await get_db()
+    if telegram_id:
+        q = "SELECT * FROM price_alerts WHERE telegram_id = ? AND active = 1 AND triggered = 0"
+        params = (telegram_id,)
+    else:
+        q = "SELECT * FROM price_alerts WHERE active = 1 AND triggered = 0"
+        params = ()
+    async with db.execute(q, params) as cursor:
+        return [dict(r) for r in await cursor.fetchall()]
+
+
+async def trigger_alert(alert_id: int):
+    db = await get_db()
+    await db.execute(
+        "UPDATE price_alerts SET triggered = 1, active = 0 WHERE id = ?", (alert_id,)
+    )
+    await db.commit()
+
+
+async def delete_alert(alert_id: int, telegram_id: int):
+    db = await get_db()
+    await db.execute(
+        "DELETE FROM price_alerts WHERE id = ? AND telegram_id = ?",
+        (alert_id, telegram_id),
+    )
+    await db.commit()
 
 
 async def count_referrals(telegram_id: int) -> int:
