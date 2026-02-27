@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 
 async def on_startup(bot: Bot):
-    logger.info("Starting Pacifica Trading Bot...")
+    logger.info("Starting Trident bot...")
     await get_db()  # init DB tables
     logger.info("Database initialised.")
 

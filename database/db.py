@@ -84,7 +84,7 @@ async def get_user(telegram_id: int) -> dict | None:
 
 async def create_user(
     telegram_id: int,
-    agent_wallet_public: str,
+    agent_wallet_public: str | None,
     agent_wallet_encrypted: str,
 ) -> dict:
     db = await get_db()

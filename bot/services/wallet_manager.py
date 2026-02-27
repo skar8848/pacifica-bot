@@ -1,5 +1,5 @@
 """
-Agent wallet generation and encrypted storage.
+Wallet generation, import, and encrypted storage.
 """
 
 from cryptography.fernet import Fernet
@@ -15,8 +15,8 @@ def _get_fernet() -> Fernet:
     return Fernet(ENCRYPTION_KEY.encode())
 
 
-def generate_agent_wallet() -> tuple[str, str]:
-    """Generate a new agent wallet.
+def generate_wallet() -> tuple[str, str]:
+    """Generate a new Solana wallet.
 
     Returns:
         (public_key_str, encrypted_private_key_b64)
@@ -24,6 +24,21 @@ def generate_agent_wallet() -> tuple[str, str]:
     kp = Keypair()
     public_key = str(kp.pubkey())
     private_key_b58 = base58.b58encode(bytes(kp)).decode("ascii")
+
+    fernet = _get_fernet()
+    encrypted = fernet.encrypt(private_key_b58.encode()).decode("ascii")
+
+    return (public_key, encrypted)
+
+
+def import_wallet(private_key_b58: str) -> tuple[str, str]:
+    """Import an existing wallet from a base58 private key.
+
+    Returns:
+        (public_key_str, encrypted_private_key_b64)
+    """
+    kp = Keypair.from_base58_string(private_key_b58)
+    public_key = str(kp.pubkey())
 
     fernet = _get_fernet()
     encrypted = fernet.encrypt(private_key_b58.encode()).decode("ascii")
@@ -39,10 +54,10 @@ def decrypt_private_key(encrypted: str) -> Keypair:
 
 
 async def get_user_keypair(telegram_id: int) -> Keypair:
-    """Load and decrypt the agent wallet keypair for a user."""
+    """Load and decrypt the wallet keypair for a user."""
     from database.db import get_user
 
     user = await get_user(telegram_id)
     if not user or not user["agent_wallet_encrypted"]:
-        raise ValueError(f"No agent wallet found for user {telegram_id}")
+        raise ValueError(f"No wallet found for user {telegram_id}")
     return decrypt_private_key(user["agent_wallet_encrypted"])

@@ -295,6 +295,23 @@ def copy_settings_kb(wallet: str) -> InlineKeyboardMarkup:
 
 
 # ------------------------------------------------------------------
+# Onboarding
+# ------------------------------------------------------------------
+
+def onboarding_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="📥 Import Wallet", callback_data="onboard:import"),
+            ],
+            [
+                InlineKeyboardButton(text="🆕 Generate New Wallet", callback_data="onboard:generate"),
+            ],
+        ]
+    )
+
+
+# ------------------------------------------------------------------
 # Settings
 # ------------------------------------------------------------------
 
@@ -302,8 +319,8 @@ def settings_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="🔗 Link Wallet", callback_data="set:link"),
-                InlineKeyboardButton(text="🔑 Agent Wallet", callback_data="set:agent"),
+                InlineKeyboardButton(text="💳 My Wallet", callback_data="set:wallet"),
+                InlineKeyboardButton(text="🔄 Switch Wallet", callback_data="set:import"),
             ],
             [
                 InlineKeyboardButton(text="🎟️ Claim Code", callback_data="set:claim"),

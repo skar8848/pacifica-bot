@@ -21,7 +21,7 @@ PACIFICA_REST_URL = _NETWORK_URLS[PACIFICA_NETWORK]["rest"]
 PACIFICA_WS_URL = _NETWORK_URLS[PACIFICA_NETWORK]["ws"]
 
 # --- Builder ---
-BUILDER_CODE = os.getenv("BUILDER_CODE", "Pacifica")
+BUILDER_CODE = os.getenv("BUILDER_CODE", "Trident")
 BUILDER_FEE_RATE = os.getenv("BUILDER_FEE_RATE", "0.0005")
 
 # --- Telegram ---
