@@ -1140,7 +1140,8 @@ async def cmd_update(message: Message):
 
         await message.answer(
             f"<b>Updated!</b>\n\n<code>{output}</code>\n\n"
-            f"Restarting bot in 2 seconds..."
+            f"Restarting bot in 2 seconds...",
+            reply_markup=main_menu_kb(),
         )
 
         # Give Telegram time to deliver the message
