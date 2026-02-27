@@ -474,7 +474,10 @@ def settings_kb(settings: dict | None = None) -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text=f"Leverage: {lev}x", callback_data="set:leverage_menu"),
             ],
             [
+                InlineKeyboardButton(text="🔑 Activate Beta", callback_data="wallet:claim_beta"),
                 InlineKeyboardButton(text="🔗 Referral", callback_data="set:referral"),
+            ],
+            [
                 InlineKeyboardButton(text="📊 Network Info", callback_data="set:network"),
             ],
             [

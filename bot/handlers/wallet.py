@@ -256,44 +256,55 @@ async def wallet_deposit_exec(callback: CallbackQuery):
 
         url = explorer_url(sig)
 
-        # Auto-setup after deposit: claim beta code + approve builder code
-        # The deposit tx needs a few seconds to be processed by Pacifica
+        # Launch background task to claim beta code + builder code with retries
         import asyncio
-        await asyncio.sleep(3)
+        tg_id = callback.from_user.id
 
-        try:
+        async def _auto_setup():
             from bot.models.user import build_client_from_user
             from bot.config import BUILDER_CODE, BUILDER_FEE_RATE, PACIFICA_REFERRAL_CODE
-            bc = build_client_from_user(user)
-            try:
-                # Claim Pacifica beta code (required to trade)
-                if PACIFICA_REFERRAL_CODE:
+            for attempt in range(5):
+                await asyncio.sleep(5 + attempt * 5)  # 5s, 10s, 15s, 20s, 25s
+                try:
+                    u = await get_user(tg_id)
+                    if not u:
+                        return
+                    bc = build_client_from_user(u)
                     try:
-                        await bc.claim_referral_code(PACIFICA_REFERRAL_CODE)
-                        logger.info("Claimed beta code '%s' for %s", PACIFICA_REFERRAL_CODE, callback.from_user.id)
-                    except Exception as e:
-                        logger.debug("Beta code claim failed (may already be claimed): %s", e)
-
-                # Approve builder code so fees work
-                if not user.get("builder_approved"):
-                    try:
+                        if PACIFICA_REFERRAL_CODE:
+                            await bc.claim_referral_code(PACIFICA_REFERRAL_CODE)
+                            logger.info("Claimed beta code for %s (attempt %d)", tg_id, attempt + 1)
                         await bc.approve_builder_code(BUILDER_CODE, BUILDER_FEE_RATE)
-                        await update_user(callback.from_user.id, builder_approved=1)
-                        logger.info("Approved builder code '%s' for %s", BUILDER_CODE, callback.from_user.id)
-                    except Exception as e:
-                        logger.debug("Builder code approval failed: %s", e)
-            finally:
-                await bc.close()
-        except Exception as e:
-            logger.debug("Post-deposit auto-setup failed: %s", e)
+                        await update_user(tg_id, builder_approved=1)
+                        logger.info("Approved builder code for %s (attempt %d)", tg_id, attempt + 1)
+                    finally:
+                        await bc.close()
+                    return  # success
+                except Exception as e:
+                    logger.debug("Auto-setup attempt %d for %s: %s", attempt + 1, tg_id, e)
+            logger.warning("Auto-setup failed after 5 attempts for %s", tg_id)
+
+        asyncio.create_task(_auto_setup())
+
+        from bot.utils.keyboards import InlineKeyboardMarkup, InlineKeyboardButton
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(text="📊 Trade", callback_data="nav:markets"),
+                InlineKeyboardButton(text="💳 Wallet", callback_data="nav:wallet"),
+            ],
+            [
+                InlineKeyboardButton(text="🔑 Activate Beta", callback_data="wallet:claim_beta"),
+                InlineKeyboardButton(text="◀️ Menu", callback_data="nav:menu"),
+            ],
+        ])
 
         await callback.message.edit_text(  # type: ignore
             f"<b>Deposit Submitted!</b>\n\n"
             f"Amount: <b>{amount:,.2f} USDC</b>\n\n"
             f"Tx: <a href='{url}'>{sig[:16]}...</a>\n\n"
-            f"Your Pacifica balance will update shortly.\n"
-            f"You can now start trading!",
-            reply_markup=main_menu_kb(),
+            f"Beta code activation in progress...\n"
+            f"If trading fails, tap <b>Activate Beta</b> below.",
+            reply_markup=kb,
             disable_web_page_preview=True,
         )
     except SolanaRPCError as e:
@@ -342,37 +353,57 @@ async def msg_deposit_amount(message: Message, state: FSMContext):
         sig = await deposit_to_pacifica(keypair, amount)
 
         url = explorer_url(sig)
+
+        from bot.utils.keyboards import InlineKeyboardMarkup, InlineKeyboardButton
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(text="📊 Trade", callback_data="nav:markets"),
+                InlineKeyboardButton(text="💳 Wallet", callback_data="nav:wallet"),
+            ],
+            [
+                InlineKeyboardButton(text="🔑 Activate Beta", callback_data="wallet:claim_beta"),
+                InlineKeyboardButton(text="◀️ Menu", callback_data="nav:menu"),
+            ],
+        ])
+
         await message.answer(
             f"<b>Deposit Submitted!</b>\n\n"
-            f"Amount: <b>{amount:,.2f} USDC</b>\n"
-            f"Tx: <a href='{url}'>{sig[:16]}...</a>",
-            reply_markup=main_menu_kb(),
+            f"Amount: <b>{amount:,.2f} USDC</b>\n\n"
+            f"Tx: <a href='{url}'>{sig[:16]}...</a>\n\n"
+            f"Beta code activation in progress...\n"
+            f"If trading fails, tap <b>Activate Beta</b> below.",
+            reply_markup=kb,
             disable_web_page_preview=True,
         )
 
-        # Auto-setup after deposit
-        import asyncio
-        await asyncio.sleep(3)
-        try:
+        # Launch background task to claim beta code + builder code with retries
+        tg_id = message.from_user.id  # type: ignore
+
+        async def _auto_setup():
             from bot.models.user import build_client_from_user
             from bot.config import BUILDER_CODE, BUILDER_FEE_RATE, PACIFICA_REFERRAL_CODE
-            bc = build_client_from_user(user)
-            try:
-                if PACIFICA_REFERRAL_CODE:
+            for attempt in range(5):
+                await asyncio.sleep(5 + attempt * 5)
+                try:
+                    u = await get_user(tg_id)
+                    if not u:
+                        return
+                    bc = build_client_from_user(u)
                     try:
-                        await bc.claim_referral_code(PACIFICA_REFERRAL_CODE)
-                    except Exception:
-                        pass
-                if not user.get("builder_approved"):
-                    try:
+                        if PACIFICA_REFERRAL_CODE:
+                            await bc.claim_referral_code(PACIFICA_REFERRAL_CODE)
+                            logger.info("Claimed beta code for %s (attempt %d)", tg_id, attempt + 1)
                         await bc.approve_builder_code(BUILDER_CODE, BUILDER_FEE_RATE)
-                        await update_user(message.from_user.id, builder_approved=1)  # type: ignore
-                    except Exception:
-                        pass
-            finally:
-                await bc.close()
-        except Exception:
-            pass
+                        await update_user(tg_id, builder_approved=1)
+                        logger.info("Approved builder code for %s (attempt %d)", tg_id, attempt + 1)
+                    finally:
+                        await bc.close()
+                    return
+                except Exception as e:
+                    logger.debug("Auto-setup attempt %d for %s: %s", attempt + 1, tg_id, e)
+            logger.warning("Auto-setup failed after 5 attempts for %s", tg_id)
+
+        asyncio.create_task(_auto_setup())
     except Exception as e:
         await message.answer(f"<b>Deposit Failed</b>\n\n{e}", reply_markup=main_menu_kb())
 
@@ -497,6 +528,60 @@ async def msg_withdraw_amount(message: Message, state: FSMContext):
             await client.close()
     except Exception as e:
         await message.answer(f"<b>Withdraw Failed</b>\n\n{e}", reply_markup=main_menu_kb())
+
+
+# ------------------------------------------------------------------
+# Claim Beta Code (manual)
+# ------------------------------------------------------------------
+
+@router.callback_query(F.data == "wallet:claim_beta")
+async def wallet_claim_beta(callback: CallbackQuery):
+    """Manually claim the Pacifica beta code + approve builder code."""
+    user = await get_user(callback.from_user.id)
+    if not user or not user.get("pacifica_account"):
+        await callback.answer("Set up your wallet first!", show_alert=True)
+        return
+
+    await callback.answer("Claiming beta code...")
+
+    from bot.models.user import build_client_from_user
+    from bot.config import BUILDER_CODE, BUILDER_FEE_RATE, PACIFICA_REFERRAL_CODE
+
+    results = []
+    try:
+        client = build_client_from_user(user)
+        try:
+            if PACIFICA_REFERRAL_CODE:
+                try:
+                    await client.claim_referral_code(PACIFICA_REFERRAL_CODE)
+                    results.append(f"✅ Beta code <code>{PACIFICA_REFERRAL_CODE}</code> claimed!")
+                except Exception as e:
+                    err = str(e)
+                    if "already" in err.lower():
+                        results.append("✅ Beta code already claimed")
+                    else:
+                        results.append(f"❌ Beta code: {err}")
+
+            try:
+                await client.approve_builder_code(BUILDER_CODE, BUILDER_FEE_RATE)
+                await update_user(callback.from_user.id, builder_approved=1)
+                results.append(f"✅ Builder code <code>{BUILDER_CODE}</code> approved!")
+            except Exception as e:
+                err = str(e)
+                if "already" in err.lower():
+                    results.append("✅ Builder code already approved")
+                else:
+                    results.append(f"❌ Builder code: {err}")
+        finally:
+            await client.close()
+    except Exception as e:
+        results.append(f"❌ Error: {e}")
+
+    await callback.message.edit_text(  # type: ignore
+        "<b>Beta Activation</b>\n\n" + "\n".join(results) + "\n\n"
+        "If both are ✅, you can trade now!",
+        reply_markup=main_menu_kb(),
+    )
 
 
 # ------------------------------------------------------------------
