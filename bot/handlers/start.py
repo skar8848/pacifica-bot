@@ -16,6 +16,8 @@ from database.db import (
     get_or_create_ref_code, get_user_by_ref_code, count_referrals,
     get_user_settings, set_user_setting,
     get_active_alerts, add_price_alert, delete_alert,
+    get_referral_stats, claim_referral_fees,
+    REFERRAL_FEE_SHARE, REFEREE_FEE_REBATE,
 )
 from bot.services.wallet_manager import generate_wallet, import_wallet
 from bot.services.pacifica_client import PacificaClient, PacificaAPIError
@@ -415,7 +417,8 @@ async def nav_positions(callback: CallbackQuery):
         )
         return
     else:
-        # Fetch mark prices and funding rates for all position symbols
+        # Fetch mark prices and funding rates for all position symbols (parallel)
+        import asyncio
         mark_prices: dict[str, float] = {}
         funding_rates: dict[str, float] = {}
         try:
@@ -426,12 +429,22 @@ async def nav_positions(callback: CallbackQuery):
                 sym = pos.get("symbol", "")
                 if sym in funding_map:
                     funding_rates[sym] = funding_map[sym]
+
+            # Fetch all prices in parallel
+            async def _fetch_price(sym: str):
                 try:
                     trades = await pub.get_trades(sym, limit=1)
                     if trades:
-                        mark_prices[sym] = float(trades[0]["price"])
+                        return sym, float(trades[0]["price"])
                 except Exception:
                     pass
+                return sym, None
+
+            symbols = [pos.get("symbol", "") for pos in positions]
+            results = await asyncio.gather(*[_fetch_price(s) for s in symbols])
+            for sym, price in results:
+                if price is not None:
+                    mark_prices[sym] = price
         except Exception as e:
             logger.debug("Failed to fetch mark prices: %s", e)
 
@@ -832,16 +845,50 @@ async def set_referral(callback: CallbackQuery):
 
     ref_code = await get_or_create_ref_code(tg_id)
     ref_link = f"https://t.me/{BOT_USERNAME}?start=ref_{ref_code}"
-    ref_count = await count_referrals(tg_id)
+    stats = await get_referral_stats(tg_id)
 
-    await callback.message.answer(  # type: ignore
-        f"<b>🔗 Your Referral</b>\n\n"
-        f"Share this link to earn from your friends' trades:\n\n"
-        f"<code>{ref_link}</code>\n\n"
-        f"Friends who join get reduced fees.\n"
-        f"You earn a share of their trading fees.\n\n"
-        f"Referrals: <b>{ref_count}</b>",
+    ref_pct = int(REFERRAL_FEE_SHARE * 100)
+    rebate_pct = int(REFEREE_FEE_REBATE * 100)
+
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    rows = []
+    if stats["unclaimed"] > 0.001:
+        rows.append([InlineKeyboardButton(
+            text=f"💰 Claim ${stats['unclaimed']:,.2f}",
+            callback_data="ref:claim",
+        )])
+    rows.append([
+        InlineKeyboardButton(text="🔄 Refresh", callback_data="set:referral"),
+        InlineKeyboardButton(text="◀️ Settings", callback_data="nav:settings"),
+    ])
+    kb = InlineKeyboardMarkup(inline_keyboard=rows)
+
+    await callback.message.edit_text(  # type: ignore
+        f"<b>🔗 Referral Program</b>\n\n"
+        f"Share your link to earn <b>{ref_pct}%</b> of your friends' trading fees.\n"
+        f"They get a <b>{rebate_pct}%</b> fee rebate.\n\n"
+        f"<b>Your link:</b>\n<code>{ref_link}</code>\n\n"
+        f"<b>Stats:</b>\n"
+        f"  Referrals: <b>{stats['referral_count']}</b>\n"
+        f"  Volume generated: <b>${stats['total_volume']:,.0f}</b>\n"
+        f"  Total earned: <b>${stats['total_earned']:,.2f}</b>\n"
+        f"  Unclaimed: <b>${stats['unclaimed']:,.2f}</b>",
+        reply_markup=kb,
     )
+
+
+@router.callback_query(F.data == "ref:claim")
+async def cb_claim_referral(callback: CallbackQuery):
+    tg_id = callback.from_user.id
+    claimed = await claim_referral_fees(tg_id)
+
+    if claimed < 0.001:
+        await callback.answer("Nothing to claim!", show_alert=True)
+        return
+
+    await callback.answer(f"Claimed ${claimed:,.2f}!", show_alert=True)
+    # Refresh referral page
+    await set_referral(callback)
 
 
 # ------------------------------------------------------------------

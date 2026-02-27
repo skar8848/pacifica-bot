@@ -60,15 +60,21 @@ def fmt_position(pos: dict, mark_price: float | None = None, funding_rate: float
     else:
         text += f"  Funding: {funding_str}\n"
 
-    # PnL — calculated from mark price
+    # PnL — calculated from mark price, including funding costs
     if mark_price:
         try:
             amt_f = float(amount)
             entry_f = float(entry)
             if side == "bid":
-                pnl_f = (mark_price - entry_f) * amt_f
+                price_pnl = (mark_price - entry_f) * amt_f
             else:
-                pnl_f = (entry_f - mark_price) * amt_f
+                price_pnl = (entry_f - mark_price) * amt_f
+            # Subtract funding costs (funding_paid is cumulative cost)
+            try:
+                funding_cost = float(funding_paid)
+            except (ValueError, TypeError):
+                funding_cost = 0
+            pnl_f = price_pnl - funding_cost
             pnl_color = "🟢" if pnl_f >= 0 else "🔴"
             pnl_sign = "+" if pnl_f >= 0 else ""
             text += f"  PnL: {pnl_color} <b>{pnl_sign}${pnl_f:,.2f}</b>\n"

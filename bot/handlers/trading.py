@@ -10,7 +10,7 @@ from aiogram.types import Message, CallbackQuery
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
-from database.db import get_user, log_trade, get_user_settings
+from database.db import get_user, log_trade, get_user_settings, log_referral_fee, REFERRAL_FEE_SHARE
 from bot.models.user import build_client_from_user
 from bot.services.pacifica_client import PacificaAPIError
 from bot.utils.keyboards import (
@@ -29,6 +29,24 @@ from bot.utils.formatters import fmt_position
 
 logger = logging.getLogger(__name__)
 router = Router()
+
+# Approximate taker fee rate on Pacifica (for referral fee tracking)
+_TAKER_FEE_RATE = 0.0004  # 0.04%
+
+
+async def _track_referral_fee(tg_id: int, symbol: str, notional: float):
+    """If user was referred, log a referral fee for the referrer."""
+    try:
+        user = await get_user(tg_id)
+        if not user or not user.get("referred_by"):
+            return
+        referrer_id = user["referred_by"]
+        trading_fee = notional * _TAKER_FEE_RATE
+        referrer_share = trading_fee * REFERRAL_FEE_SHARE
+        if referrer_share > 0:
+            await log_referral_fee(referrer_id, tg_id, symbol, notional, referrer_share)
+    except Exception as e:
+        logger.debug("Referral fee tracking error: %s", e)
 
 
 class TradeStates(StatesGroup):
@@ -421,6 +439,7 @@ async def cb_execute_trade(callback: CallbackQuery):
         fill_price = resp.get("fill_price", resp.get("price", resp.get("avg_fill_price", "")))
 
         await log_trade(tg_id, symbol, side, token_amount, str(fill_price), "market")
+        await _track_referral_fee(tg_id, symbol, notional)
 
         direction = "🟢 LONG" if side == "bid" else "🔴 SHORT"
         price_line = f"Fill price: <b>${fill_price}</b>\n" if fill_price else ""
@@ -487,6 +506,7 @@ async def cb_exec_trade_with_tpsl(callback: CallbackQuery, state: FSMContext):
         fill_price = resp.get("fill_price", resp.get("price", resp.get("avg_fill_price", str(price))))
 
         await log_trade(tg_id, symbol, side, token_amount, str(fill_price), "market")
+        await _track_referral_fee(tg_id, symbol, notional)
 
         # Store trade info for TP/SL flow
         await state.update_data(
@@ -724,6 +744,7 @@ async def cb_exec_limit(callback: CallbackQuery):
         order_id = resp.get("order_id", resp.get("id", "?"))
 
         await log_trade(tg_id, symbol, side, token_amount, limit_price, "limit")
+        await _track_referral_fee(tg_id, symbol, notional)
 
         direction = "📗 BUY" if side == "bid" else "📕 SELL"
         await callback.message.edit_text(  # type: ignore
@@ -774,8 +795,23 @@ async def cb_position_detail(callback: CallbackQuery):
         )
         return
 
+    # Fetch mark price and funding rate for full display
+    mark_price = await _get_price(symbol)
+    funding_rate = None
+    try:
+        from solders.keypair import Keypair as _Kp
+        from bot.services.pacifica_client import PacificaClient as _PC
+        _c = _PC(account="public", keypair=_Kp())
+        markets = await _c.get_markets_info()
+        await _c.close()
+        m = next((x for x in markets if x.get("symbol") == symbol), None)
+        if m:
+            funding_rate = float(m.get("funding_rate", 0) or 0)
+    except Exception:
+        pass
+
     await callback.message.edit_text(  # type: ignore
-        f"<b>Position Detail</b>\n\n{fmt_position(pos)}",
+        f"<b>Position Detail</b>\n\n{fmt_position(pos, mark_price=mark_price, funding_rate=funding_rate)}",
         reply_markup=position_detail_kb(symbol, pos.get("side", "bid")),
     )
 
