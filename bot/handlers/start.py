@@ -620,17 +620,20 @@ async def nav_history(callback: CallbackQuery):
     if not orders:
         text = "<b>📜 History</b>\n\nNo orders yet. Start trading!"
     else:
+        if orders:
+            logger.info("Order history sample: %s", orders[0])
         text = "<b>📜 Order History</b>\n\n"
         for o in orders[:15]:
             symbol = o.get("symbol", "?")
             side = o.get("side", "?")
             amount = o.get("amount", "?")
-            price = o.get("price", o.get("fill_price", "?"))
+            price = o.get("price") or o.get("fill_price") or o.get("avg_fill_price") or o.get("average_fill_price") or ""
             otype = o.get("order_type", o.get("type", "?"))
             status = o.get("status", "")
             direction = "BUY" if side == "bid" else "SELL"
             emoji = "🟢" if side == "bid" else "🔴"
-            text += f"{emoji} {symbol} {direction} {amount} @ ${price} ({otype}) {status}\n"
+            price_str = f" @ ${price}" if price else ""
+            text += f"{emoji} {symbol} {direction} {amount}{price_str} ({otype}) {status}\n"
 
     if len(text) > 4000:
         text = text[:4000] + "\n..."

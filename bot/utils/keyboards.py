@@ -206,10 +206,15 @@ def positions_kb(positions: list) -> InlineKeyboardMarkup:
         symbol = pos.get("symbol", "?")
         side = pos.get("side", "bid")
         direction = "🟢" if side == "bid" else "🔴"
-        pnl = pos.get("unrealized_pnl", pos.get("pnl", "0"))
+        pnl_raw = pos.get("unrealized_pnl", pos.get("pnl", "0"))
+        try:
+            pnl_f = float(pnl_raw)
+            pnl_str = f"+${pnl_f:,.2f}" if pnl_f >= 0 else f"-${abs(pnl_f):,.2f}"
+        except (ValueError, TypeError):
+            pnl_str = str(pnl_raw)
         rows.append([
             InlineKeyboardButton(
-                text=f"{direction} {symbol}  PnL: {pnl}",
+                text=f"{direction} {symbol}  {pnl_str}",
                 callback_data=f"pos:{symbol}",
             )
         ])

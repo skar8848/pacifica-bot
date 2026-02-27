@@ -3,6 +3,20 @@ Telegram message formatting — adapted to real Pacifica API response formats.
 """
 
 
+def _fmt_price(val) -> str:
+    """Format a price value with appropriate decimals."""
+    try:
+        f = float(val)
+        if abs(f) >= 1000:
+            return f"{f:,.2f}"
+        elif abs(f) >= 1:
+            return f"{f:.2f}"
+        else:
+            return f"{f:.6f}"
+    except (ValueError, TypeError):
+        return str(val)
+
+
 def fmt_position(pos: dict) -> str:
     symbol = pos.get("symbol", "?")
     side = pos.get("side", "?")
@@ -26,19 +40,25 @@ def fmt_position(pos: dict) -> str:
     text += "\n"
     text += f"  Size: {amount}\n"
     if notional:
-        text += f"  Notional: ${notional}\n"
-    text += f"  Entry: ${entry}\n"
+        text += f"  Notional: ${_fmt_price(notional)}\n"
+    text += f"  Entry: ${_fmt_price(entry)}\n"
     if mark:
-        text += f"  Mark: ${mark}\n"
+        text += f"  Mark: ${_fmt_price(mark)}\n"
     if upnl:
         try:
             pnl_f = float(upnl)
+            pnl_color = "🟢" if pnl_f >= 0 else "🔴"
             pnl_sign = "+" if pnl_f >= 0 else ""
-            pnl_emoji = "💚" if pnl_f >= 0 else "❤️"
-            text += f"  PnL: {pnl_emoji} {pnl_sign}{pnl_f:,.2f} USDC\n"
+            text += f"  PnL: {pnl_color} <b>{pnl_sign}${pnl_f:,.2f}</b>\n"
         except (ValueError, TypeError):
             text += f"  PnL: {upnl}\n"
-    text += f"  Liq: ${liq}\n"
+    # Hide liquidation price if it's negative (cross mode artifact)
+    try:
+        liq_f = float(liq)
+        if liq_f > 0:
+            text += f"  Liq: ${_fmt_price(liq)}\n"
+    except (ValueError, TypeError):
+        text += f"  Liq: ${liq}\n"
     text += f"  Funding: {funding} | {mode}\n"
     return text
 
