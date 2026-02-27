@@ -36,6 +36,48 @@ logger = logging.getLogger(__name__)
 router = Router()
 
 
+async def _auto_claim_beta(tg_id: int):
+    """Background task: claim beta code + approve builder code with retries."""
+    from bot.models.user import build_client_from_user
+    from bot.config import BUILDER_CODE, BUILDER_FEE_RATE, PACIFICA_REFERRAL_CODE
+
+    for attempt in range(5):
+        await asyncio.sleep(5 + attempt * 5)  # 5s, 10s, 15s, 20s, 25s
+        try:
+            u = await get_user(tg_id)
+            if not u:
+                return
+            bc = build_client_from_user(u)
+            try:
+                # Claim beta/referral code
+                if PACIFICA_REFERRAL_CODE:
+                    try:
+                        await bc.claim_referral_code(PACIFICA_REFERRAL_CODE)
+                        logger.info("Claimed beta code for %s (attempt %d)", tg_id, attempt + 1)
+                    except Exception as e:
+                        if "already" in str(e).lower():
+                            logger.debug("Beta code already claimed for %s", tg_id)
+                        else:
+                            raise
+
+                # Approve builder code (skip if not registered on Pacifica yet)
+                try:
+                    await bc.approve_builder_code(BUILDER_CODE, BUILDER_FEE_RATE)
+                    await update_user(tg_id, builder_approved=1)
+                    logger.info("Approved builder code for %s (attempt %d)", tg_id, attempt + 1)
+                except Exception as e:
+                    if "not found" in str(e).lower():
+                        logger.debug("Builder code '%s' not registered yet, skipping", BUILDER_CODE)
+                    else:
+                        raise
+            finally:
+                await bc.close()
+            return  # success
+        except Exception as e:
+            logger.debug("Auto-setup attempt %d for %s: %s", attempt + 1, tg_id, e)
+    logger.warning("Auto-setup failed after 5 attempts for %s", tg_id)
+
+
 class WalletStates(StatesGroup):
     waiting_deposit_amount = State()
     waiting_withdraw_amount = State()
@@ -260,31 +302,7 @@ async def wallet_deposit_exec(callback: CallbackQuery):
         import asyncio
         tg_id = callback.from_user.id
 
-        async def _auto_setup():
-            from bot.models.user import build_client_from_user
-            from bot.config import BUILDER_CODE, BUILDER_FEE_RATE, PACIFICA_REFERRAL_CODE
-            for attempt in range(5):
-                await asyncio.sleep(5 + attempt * 5)  # 5s, 10s, 15s, 20s, 25s
-                try:
-                    u = await get_user(tg_id)
-                    if not u:
-                        return
-                    bc = build_client_from_user(u)
-                    try:
-                        if PACIFICA_REFERRAL_CODE:
-                            await bc.claim_referral_code(PACIFICA_REFERRAL_CODE)
-                            logger.info("Claimed beta code for %s (attempt %d)", tg_id, attempt + 1)
-                        await bc.approve_builder_code(BUILDER_CODE, BUILDER_FEE_RATE)
-                        await update_user(tg_id, builder_approved=1)
-                        logger.info("Approved builder code for %s (attempt %d)", tg_id, attempt + 1)
-                    finally:
-                        await bc.close()
-                    return  # success
-                except Exception as e:
-                    logger.debug("Auto-setup attempt %d for %s: %s", attempt + 1, tg_id, e)
-            logger.warning("Auto-setup failed after 5 attempts for %s", tg_id)
-
-        asyncio.create_task(_auto_setup())
+        asyncio.create_task(_auto_claim_beta(callback.from_user.id))
 
         from bot.utils.keyboards import InlineKeyboardMarkup, InlineKeyboardButton
         kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -376,34 +394,7 @@ async def msg_deposit_amount(message: Message, state: FSMContext):
             disable_web_page_preview=True,
         )
 
-        # Launch background task to claim beta code + builder code with retries
-        tg_id = message.from_user.id  # type: ignore
-
-        async def _auto_setup():
-            from bot.models.user import build_client_from_user
-            from bot.config import BUILDER_CODE, BUILDER_FEE_RATE, PACIFICA_REFERRAL_CODE
-            for attempt in range(5):
-                await asyncio.sleep(5 + attempt * 5)
-                try:
-                    u = await get_user(tg_id)
-                    if not u:
-                        return
-                    bc = build_client_from_user(u)
-                    try:
-                        if PACIFICA_REFERRAL_CODE:
-                            await bc.claim_referral_code(PACIFICA_REFERRAL_CODE)
-                            logger.info("Claimed beta code for %s (attempt %d)", tg_id, attempt + 1)
-                        await bc.approve_builder_code(BUILDER_CODE, BUILDER_FEE_RATE)
-                        await update_user(tg_id, builder_approved=1)
-                        logger.info("Approved builder code for %s (attempt %d)", tg_id, attempt + 1)
-                    finally:
-                        await bc.close()
-                    return
-                except Exception as e:
-                    logger.debug("Auto-setup attempt %d for %s: %s", attempt + 1, tg_id, e)
-            logger.warning("Auto-setup failed after 5 attempts for %s", tg_id)
-
-        asyncio.create_task(_auto_setup())
+        asyncio.create_task(_auto_claim_beta(message.from_user.id))
     except Exception as e:
         await message.answer(f"<b>Deposit Failed</b>\n\n{e}", reply_markup=main_menu_kb())
 
@@ -570,6 +561,8 @@ async def wallet_claim_beta(callback: CallbackQuery):
                 err = str(e)
                 if "already" in err.lower():
                     results.append("✅ Builder code already approved")
+                elif "not found" in err.lower():
+                    results.append(f"⏳ Builder code <code>{BUILDER_CODE}</code> not registered on Pacifica yet")
                 else:
                     results.append(f"❌ Builder code: {err}")
         finally:
@@ -577,9 +570,10 @@ async def wallet_claim_beta(callback: CallbackQuery):
     except Exception as e:
         results.append(f"❌ Error: {e}")
 
+    can_trade = any("Beta code" in r and "✅" in r for r in results)
+    footer = "You can trade now!" if can_trade else "Fix the issues above to start trading."
     await callback.message.edit_text(  # type: ignore
-        "<b>Beta Activation</b>\n\n" + "\n".join(results) + "\n\n"
-        "If both are ✅, you can trade now!",
+        f"<b>Beta Activation</b>\n\n" + "\n".join(results) + f"\n\n{footer}",
         reply_markup=main_menu_kb(),
     )
 

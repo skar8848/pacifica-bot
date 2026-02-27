@@ -162,29 +162,29 @@ async def _finish_wallet_setup(tg_id: int, pub: str, enc: str, state: FSMContext
         if referrer and referrer["telegram_id"] != tg_id:
             await update_user(tg_id, referred_by=referrer["telegram_id"])
 
-    # Auto-setup in background: claim referral + approve builder code
+    # Auto-setup: claim beta code + approve builder code
     try:
         from bot.models.user import build_client_from_user
         u = await get_user(tg_id)
         client = build_client_from_user(u)
-
-        # Claim Pacifica beta code
-        if PACIFICA_REFERRAL_CODE:
-            try:
-                await client.claim_referral_code(PACIFICA_REFERRAL_CODE)
-                logger.info("Auto-claimed Pacifica code for user %s", tg_id)
-            except Exception as e:
-                logger.debug("Auto-claim failed (may already be claimed): %s", e)
-
-        # Auto-approve builder code so fees work
         try:
-            await client.approve_builder_code(BUILDER_CODE, BUILDER_FEE_RATE)
-            await update_user(tg_id, builder_approved=1)
-            logger.info("Auto-approved builder code '%s' for user %s", BUILDER_CODE, tg_id)
-        except Exception as e:
-            logger.debug("Builder code approval failed (may need deposit first): %s", e)
+            if PACIFICA_REFERRAL_CODE:
+                try:
+                    await client.claim_referral_code(PACIFICA_REFERRAL_CODE)
+                    logger.info("Auto-claimed beta code for user %s", tg_id)
+                except Exception as e:
+                    if "already" not in str(e).lower():
+                        logger.debug("Beta claim failed (may need deposit first): %s", e)
 
-        await client.close()
+            try:
+                await client.approve_builder_code(BUILDER_CODE, BUILDER_FEE_RATE)
+                await update_user(tg_id, builder_approved=1)
+                logger.info("Approved builder code '%s' for user %s", BUILDER_CODE, tg_id)
+            except Exception as e:
+                if "not found" not in str(e).lower():
+                    logger.debug("Builder code approval failed: %s", e)
+        finally:
+            await client.close()
     except Exception as e:
         logger.debug("Auto-setup failed: %s", e)
 
