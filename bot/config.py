@@ -7,6 +7,10 @@ load_dotenv()
 PACIFICA_NETWORK = os.getenv("PACIFICA_NETWORK", "testnet")
 
 _NETWORK_URLS = {
+    "devnet": {
+        "rest": "https://test-api.pacifica.fi/api/v1",
+        "ws": "wss://test-ws.pacifica.fi/ws",
+    },
     "testnet": {
         "rest": "https://test-api.pacifica.fi/api/v1",
         "ws": "wss://test-ws.pacifica.fi/ws",
