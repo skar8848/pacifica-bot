@@ -117,11 +117,12 @@ async def wallet_faucet(callback: CallbackQuery):
         await callback.answer("Faucet only available on devnet!", show_alert=True)
         return
 
-    await callback.answer("Minting 10K mock USDC...")
     user = await get_user(callback.from_user.id)
     if not user or not user.get("agent_wallet_encrypted"):
-        await callback.answer("No wallet set up!", show_alert=True)
+        await callback.answer("Set up your wallet first! Use /start", show_alert=True)
         return
+
+    await callback.answer("Minting 10K mock USDC...")
 
     try:
         keypair = decrypt_private_key(user["agent_wallet_encrypted"])
@@ -160,11 +161,12 @@ async def wallet_airdrop(callback: CallbackQuery):
         await callback.answer("Airdrop only available on devnet!", show_alert=True)
         return
 
-    await callback.answer("Requesting 1 SOL from faucet...")
     user = await get_user(callback.from_user.id)
     if not user or not user.get("pacifica_account"):
-        await callback.answer("No wallet set up!", show_alert=True)
+        await callback.answer("Set up your wallet first! Use /start", show_alert=True)
         return
+
+    await callback.answer("Requesting 1 SOL from faucet...")
 
     try:
         sig = await request_sol_airdrop(user["pacifica_account"], 1.0)

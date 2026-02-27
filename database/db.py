@@ -114,6 +114,7 @@ async def create_user(
 
 async def delete_user(telegram_id: int):
     db = await get_db()
+    await db.execute("DELETE FROM price_alerts WHERE telegram_id = ?", (telegram_id,))
     await db.execute("DELETE FROM trade_log WHERE telegram_id = ?", (telegram_id,))
     await db.execute("DELETE FROM copy_configs WHERE telegram_id = ?", (telegram_id,))
     await db.execute("DELETE FROM users WHERE telegram_id = ?", (telegram_id,))
