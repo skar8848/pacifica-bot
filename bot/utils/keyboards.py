@@ -13,8 +13,7 @@ def main_menu_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="📊 Markets", callback_data="nav:markets"),
-                InlineKeyboardButton(text="⚡ Trade", callback_data="nav:trade"),
+                InlineKeyboardButton(text="📊 Trade", callback_data="nav:markets"),
             ],
             [
                 InlineKeyboardButton(text="📈 Positions", callback_data="nav:positions"),
@@ -261,9 +260,6 @@ def copy_menu_kb() -> InlineKeyboardMarkup:
             [
                 InlineKeyboardButton(text="➕ Copy a Wallet", callback_data="copy:add"),
                 InlineKeyboardButton(text="👥 My Masters", callback_data="copy:masters"),
-            ],
-            [
-                InlineKeyboardButton(text="📜 Copy Log", callback_data="copy:log"),
             ],
             [
                 InlineKeyboardButton(text="◀️ Menu", callback_data="nav:menu"),

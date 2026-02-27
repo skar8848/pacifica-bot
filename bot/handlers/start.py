@@ -73,19 +73,15 @@ async def cmd_start(message: Message):
         wallet = user["pacifica_account"]
         await message.answer(
             f"<b>{BOT_NAME}</b> — Pacifica Perps\n\n"
-            f"Network: <code>{PACIFICA_NETWORK}</code>\n"
-            f"Wallet: <code>{wallet[:8]}...{wallet[-4:]}</code>\n\n"
-            f"What do you want to do?",
+            f"Wallet: <code>{wallet[:8]}...{wallet[-4:]}</code>",
             reply_markup=main_menu_kb(),
         )
         return
 
-    # New user — show onboarding
+    # New or incomplete user — always show wallet setup
     await message.answer(
-        f"<b>Welcome to {BOT_NAME}!</b>\n\n"
-        f"Trade perpetual futures on Pacifica — right from Telegram.\n\n"
-        f"To get started, import your existing Solana wallet "
-        f"or generate a new one:",
+        f"<b>{BOT_NAME}</b> — Trade perps on Pacifica from Telegram.\n\n"
+        f"Import your Solana wallet or generate a new one:",
         reply_markup=onboarding_kb(),
     )
 
@@ -651,6 +647,23 @@ async def copy_log(callback: CallbackQuery):
             )
 
     await callback.message.edit_text(text, reply_markup=copy_menu_kb())  # type: ignore
+
+
+# ------------------------------------------------------------------
+# /clear — reset user data (dev/testing)
+# ------------------------------------------------------------------
+
+@router.message(Command("clear"))
+async def cmd_clear(message: Message, state: FSMContext):
+    tg_id = message.from_user.id  # type: ignore
+    await state.clear()
+
+    from database.db import delete_user
+    await delete_user(tg_id)
+
+    await message.answer(
+        f"<b>Data cleared.</b>\n\nTap /start to set up again.",
+    )
 
 
 # ------------------------------------------------------------------

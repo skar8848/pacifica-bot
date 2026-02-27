@@ -97,6 +97,14 @@ async def create_user(
     return (await get_user(telegram_id))  # type: ignore
 
 
+async def delete_user(telegram_id: int):
+    db = await get_db()
+    await db.execute("DELETE FROM trade_log WHERE telegram_id = ?", (telegram_id,))
+    await db.execute("DELETE FROM copy_configs WHERE telegram_id = ?", (telegram_id,))
+    await db.execute("DELETE FROM users WHERE telegram_id = ?", (telegram_id,))
+    await db.commit()
+
+
 async def update_user(telegram_id: int, **fields):
     db = await get_db()
     sets = ", ".join(f"{k} = ?" for k in fields)
