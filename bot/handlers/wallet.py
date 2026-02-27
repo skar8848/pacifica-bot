@@ -251,20 +251,36 @@ async def wallet_deposit_exec(callback: CallbackQuery):
 
         url = explorer_url(sig)
 
-        # Auto-approve builder code after first deposit
+        # Auto-setup after deposit: claim beta code + approve builder code
+        # The deposit tx needs a few seconds to be processed by Pacifica
+        import asyncio
+        await asyncio.sleep(3)
+
         try:
             from bot.models.user import build_client_from_user
-            from bot.config import BUILDER_CODE, BUILDER_FEE_RATE
-            if not user.get("builder_approved"):
-                bc = build_client_from_user(user)
-                try:
-                    await bc.approve_builder_code(BUILDER_CODE, BUILDER_FEE_RATE)
-                    await update_user(callback.from_user.id, builder_approved=1)
-                    logger.info("Auto-approved builder code after deposit for %s", callback.from_user.id)
-                finally:
-                    await bc.close()
+            from bot.config import BUILDER_CODE, BUILDER_FEE_RATE, PACIFICA_REFERRAL_CODE
+            bc = build_client_from_user(user)
+            try:
+                # Claim Pacifica beta code (required to trade)
+                if PACIFICA_REFERRAL_CODE:
+                    try:
+                        await bc.claim_referral_code(PACIFICA_REFERRAL_CODE)
+                        logger.info("Claimed beta code '%s' for %s", PACIFICA_REFERRAL_CODE, callback.from_user.id)
+                    except Exception as e:
+                        logger.debug("Beta code claim failed (may already be claimed): %s", e)
+
+                # Approve builder code so fees work
+                if not user.get("builder_approved"):
+                    try:
+                        await bc.approve_builder_code(BUILDER_CODE, BUILDER_FEE_RATE)
+                        await update_user(callback.from_user.id, builder_approved=1)
+                        logger.info("Approved builder code '%s' for %s", BUILDER_CODE, callback.from_user.id)
+                    except Exception as e:
+                        logger.debug("Builder code approval failed: %s", e)
+            finally:
+                await bc.close()
         except Exception as e:
-            logger.debug("Post-deposit builder approval failed: %s", e)
+            logger.debug("Post-deposit auto-setup failed: %s", e)
 
         await callback.message.edit_text(  # type: ignore
             f"<b>Deposit Submitted!</b>\n\n"
@@ -328,6 +344,30 @@ async def msg_deposit_amount(message: Message, state: FSMContext):
             reply_markup=main_menu_kb(),
             disable_web_page_preview=True,
         )
+
+        # Auto-setup after deposit
+        import asyncio
+        await asyncio.sleep(3)
+        try:
+            from bot.models.user import build_client_from_user
+            from bot.config import BUILDER_CODE, BUILDER_FEE_RATE, PACIFICA_REFERRAL_CODE
+            bc = build_client_from_user(user)
+            try:
+                if PACIFICA_REFERRAL_CODE:
+                    try:
+                        await bc.claim_referral_code(PACIFICA_REFERRAL_CODE)
+                    except Exception:
+                        pass
+                if not user.get("builder_approved"):
+                    try:
+                        await bc.approve_builder_code(BUILDER_CODE, BUILDER_FEE_RATE)
+                        await update_user(message.from_user.id, builder_approved=1)  # type: ignore
+                    except Exception:
+                        pass
+            finally:
+                await bc.close()
+        except Exception:
+            pass
     except Exception as e:
         await message.answer(f"<b>Deposit Failed</b>\n\n{e}", reply_markup=main_menu_kb())
 
