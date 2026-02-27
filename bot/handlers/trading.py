@@ -396,19 +396,21 @@ async def cb_execute_trade(callback: CallbackQuery):
         )
         await client.close()
 
+        logger.info("Order response: %s", resp)
         order_id = resp.get("order_id", resp.get("id", "?"))
-        fill_price = resp.get("fill_price", resp.get("price", "?"))
+        fill_price = resp.get("fill_price", resp.get("price", resp.get("avg_fill_price", "")))
 
         await log_trade(tg_id, symbol, side, token_amount, str(fill_price), "market")
 
         direction = "🟢 LONG" if side == "bid" else "🔴 SHORT"
+        price_line = f"Fill price: <b>${fill_price}</b>\n" if fill_price else ""
         await callback.message.edit_text(  # type: ignore
             f"<b>✅ Order Executed!</b>\n\n"
             f"{direction} <b>{symbol}</b>\n"
             f"Size: ${usdc_amount} USDC ({token_amount} {symbol})\n"
             f"Leverage: {leverage}x\n"
             f"Notional: ${notional:,.0f}\n"
-            f"Fill price: ${fill_price}\n"
+            f"{price_line}"
             f"Order ID: <code>{order_id}</code>",
             reply_markup=main_menu_kb(),
         )
@@ -459,8 +461,9 @@ async def cb_exec_trade_with_tpsl(callback: CallbackQuery, state: FSMContext):
         )
         await client.close()
 
+        logger.info("Order+TPSL response: %s", resp)
         order_id = resp.get("order_id", resp.get("id", "?"))
-        fill_price = resp.get("fill_price", resp.get("price", str(price)))
+        fill_price = resp.get("fill_price", resp.get("price", resp.get("avg_fill_price", str(price))))
 
         await log_trade(tg_id, symbol, side, token_amount, str(fill_price), "market")
 
@@ -468,14 +471,15 @@ async def cb_exec_trade_with_tpsl(callback: CallbackQuery, state: FSMContext):
         await state.update_data(
             tpsl_symbol=symbol,
             tpsl_side=side,
-            tpsl_fill_price=fill_price,
+            tpsl_fill_price=fill_price or str(price),
         )
         await state.set_state(TradeStates.waiting_auto_tp)
 
         direction = "🟢 LONG" if side == "bid" else "🔴 SHORT"
+        price_display = fill_price or str(price)
         await callback.message.edit_text(  # type: ignore
             f"<b>✅ Order Executed!</b>\n\n"
-            f"{direction} <b>{symbol}</b> @ ${fill_price}\n"
+            f"{direction} <b>{symbol}</b> @ ${price_display}\n"
             f"Size: ${usdc_amount} USDC | {leverage}x\n\n"
             f"Now set your <b>Take Profit</b> price:\n"
             f"(or type <code>skip</code> to skip)",
