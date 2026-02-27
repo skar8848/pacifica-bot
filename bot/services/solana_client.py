@@ -351,12 +351,35 @@ def explorer_url(signature: str) -> str:
 # Exceptions
 # ---------------------------------------------------------------------------
 
+# Known Pacifica program errors
+PACIFICA_ERRORS = {
+    0x66: "Faucet cooldown — try again in a few minutes",
+    0x1: "Insufficient funds",
+    0x0: "Generic program error",
+}
+
+
 class SolanaRPCError(Exception):
     def __init__(self, error: dict | str):
         if isinstance(error, dict):
             self.code = error.get("code", -1)
             msg = error.get("message", str(error))
+            # Parse custom program errors for better messages
+            data = error.get("data", {})
+            if isinstance(data, dict):
+                logs = data.get("logs", [])
+                # Extract custom program error code
+                for log in logs:
+                    if "custom program error:" in str(log):
+                        try:
+                            hex_code = str(log).split("custom program error: ")[1].strip()
+                            err_code = int(hex_code, 16)
+                            friendly = PACIFICA_ERRORS.get(err_code, f"Program error {hex_code}")
+                            msg = friendly
+                            break
+                        except (ValueError, IndexError):
+                            pass
         else:
             self.code = -1
             msg = str(error)
-        super().__init__(f"Solana RPC error {self.code}: {msg}")
+        super().__init__(msg)

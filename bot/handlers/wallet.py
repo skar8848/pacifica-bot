@@ -138,10 +138,13 @@ async def wallet_faucet(callback: CallbackQuery):
             disable_web_page_preview=True,
         )
     except SolanaRPCError as e:
+        wallet = user.get("pacifica_account", "")
+        acct_url = f"https://explorer.solana.com/address/{wallet}?cluster=devnet" if wallet else ""
+        link = f"\n\n<a href='{acct_url}'>View wallet on Explorer</a>" if acct_url else ""
         await callback.message.edit_text(  # type: ignore
-            f"<b>Faucet Failed</b>\n\n{e}\n\n"
-            f"Make sure you have SOL for transaction fees.",
+            f"<b>Faucet Failed</b>\n\n{e}{link}",
             reply_markup=wallet_kb(0, 0),
+            disable_web_page_preview=True,
         )
     except Exception as e:
         logger.error("Faucet error: %s", e, exc_info=True)
