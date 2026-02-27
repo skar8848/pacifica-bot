@@ -126,15 +126,16 @@ class PacificaClient:
         client_order_id: str | None = None,
     ) -> dict:
         header = self._make_header("create_market_order")
-        payload = {
+        payload: dict[str, Any] = {
             "symbol": symbol,
             "side": side,
             "amount": amount,
             "slippage_percent": slippage,
             "reduce_only": reduce_only,
             "client_order_id": client_order_id or str(uuid.uuid4()),
-            "builder_code": self.builder_code,
         }
+        if self.builder_code:
+            payload["builder_code"] = self.builder_code
         return await self._post("/orders/create_market", self._build_request(header, payload))
 
     async def create_limit_order(
@@ -148,7 +149,7 @@ class PacificaClient:
         client_order_id: str | None = None,
     ) -> dict:
         header = self._make_header("create_order")
-        payload = {
+        payload: dict[str, Any] = {
             "symbol": symbol,
             "side": side,
             "amount": amount,
@@ -156,8 +157,9 @@ class PacificaClient:
             "tif": tif,
             "reduce_only": reduce_only,
             "client_order_id": client_order_id or str(uuid.uuid4()),
-            "builder_code": self.builder_code,
         }
+        if self.builder_code:
+            payload["builder_code"] = self.builder_code
         return await self._post("/orders/create", self._build_request(header, payload))
 
     async def create_stop_order(
@@ -178,8 +180,9 @@ class PacificaClient:
             "stop_price": stop_price,
             "reduce_only": reduce_only,
             "client_order_id": client_order_id or str(uuid.uuid4()),
-            "builder_code": self.builder_code,
         }
+        if self.builder_code:
+            payload["builder_code"] = self.builder_code
         if limit_price:
             payload["limit_price"] = limit_price
         return await self._post("/orders/stop/create", self._build_request(header, payload))
@@ -195,8 +198,9 @@ class PacificaClient:
         payload: dict[str, Any] = {
             "symbol": symbol,
             "side": side,
-            "builder_code": self.builder_code,
         }
+        if self.builder_code:
+            payload["builder_code"] = self.builder_code
         if take_profit:
             tp = {
                 "stop_price": take_profit["stop_price"],
