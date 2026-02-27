@@ -216,7 +216,11 @@ def positions_kb(positions: list) -> InlineKeyboardMarkup:
             InlineKeyboardButton(
                 text=f"{direction} {symbol}  {pnl_str}",
                 callback_data=f"pos:{symbol}",
-            )
+            ),
+            InlineKeyboardButton(
+                text=f"❌ Close",
+                callback_data=f"close_pos:{symbol}",
+            ),
         ])
     if not rows:
         rows.append([InlineKeyboardButton(text="No positions — Trade now!", callback_data="nav:trade")])

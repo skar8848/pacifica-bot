@@ -404,6 +404,8 @@ async def nav_positions(callback: CallbackQuery):
     if not positions:
         text = "<b>📈 Positions</b>\n\nNo open positions."
     else:
+        if positions:
+            logger.info("Position sample: %s", positions[0])
         text = "<b>📈 Positions</b>\n\n"
         for pos in positions:
             text += fmt_position(pos) + "\n"
