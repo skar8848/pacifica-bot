@@ -59,12 +59,12 @@ async def _get_price(symbol: str) -> float | None:
 
 async def _get_max_leverage(symbol: str) -> int:
     """Fetch max leverage for a symbol."""
-    max_lev, _ = await _get_market_info(symbol)
+    max_lev, _, _ = await _get_market_info(symbol)
     return max_lev
 
 
-async def _get_market_info(symbol: str) -> tuple[int, str]:
-    """Fetch max leverage and tick_size for a symbol."""
+async def _get_market_info(symbol: str) -> tuple[int, str, str]:
+    """Fetch max leverage, tick_size, and lot_size for a symbol."""
     try:
         from solders.keypair import Keypair
         from bot.services.pacifica_client import PacificaClient
@@ -73,25 +73,42 @@ async def _get_market_info(symbol: str) -> tuple[int, str]:
         await client.close()
         m = next((x for x in markets if x.get("symbol") == symbol), None)
         if m:
-            return int(m.get("max_leverage", 50)), str(m.get("tick_size", "1"))
+            return (
+                int(m.get("max_leverage", 50)),
+                str(m.get("tick_size", "1")),
+                str(m.get("lot_size", "0.01")),
+            )
     except Exception:
         pass
-    return 50, "1"
+    return 50, "1", "0.01"
 
 
-def _usdc_to_token(usdc_amount: float, price: float, lot_size: str = "0.00001") -> str:
-    """Convert USDC notional to token amount, rounded to lot size."""
+# Cache lot sizes per symbol (populated on first market info fetch)
+_lot_sizes: dict[str, str] = {}
+
+
+async def _get_lot_size(symbol: str) -> str:
+    """Get lot size for a symbol, using cache or fetching from API."""
+    if symbol in _lot_sizes:
+        return _lot_sizes[symbol]
+    _, _, lot = await _get_market_info(symbol)
+    _lot_sizes[symbol] = lot
+    return lot
+
+
+def _usdc_to_token(usdc_amount: float, price: float, lot_size: str = "0.01") -> str:
+    """Convert USDC notional to token amount, rounded down to lot size."""
     if price <= 0:
         return "0"
     raw = usdc_amount / price
-    # Round to lot_size precision
     lot = float(lot_size)
+    # Round DOWN to lot size (avoid exceeding balance)
+    import math
+    rounded = math.floor(raw / lot) * lot
     if lot >= 1:
-        rounded = round(raw / lot) * lot
         return str(int(rounded))
     else:
         decimals = len(lot_size.split(".")[-1]) if "." in lot_size else 0
-        rounded = round(raw / lot) * lot
         return f"{rounded:.{decimals}f}"
 
 
@@ -268,7 +285,8 @@ async def cb_trade_leverage(callback: CallbackQuery):
     price = await _get_price(symbol)
     if price:
         notional = float(usdc_amount) * float(leverage)
-        token_amount = _usdc_to_token(notional, price)
+        lot_size = await _get_lot_size(symbol)
+        token_amount = _usdc_to_token(notional, price, lot_size)
         price_line = f"Price: ${price:,.2f}\n"
         token_line = f"Token amount: ~{token_amount} {symbol}\n"
     else:
@@ -333,7 +351,8 @@ async def msg_custom_leverage(message: Message, state: FSMContext):
     price = await _get_price(symbol)
     if price:
         notional = float(usdc_amount) * float(leverage)
-        token_amount = _usdc_to_token(notional, price)
+        lot_size = await _get_lot_size(symbol)
+        token_amount = _usdc_to_token(notional, price, lot_size)
         price_line = f"Price: ${price:,.2f}\n"
         token_line = f"Token amount: ~{token_amount} {symbol}\n"
     else:
@@ -380,7 +399,8 @@ async def cb_execute_trade(callback: CallbackQuery):
         return
 
     notional = float(usdc_amount) * float(leverage)
-    token_amount = _usdc_to_token(notional, price)
+    lot_size = await _get_lot_size(symbol)
+    token_amount = _usdc_to_token(notional, price, lot_size)
 
     # Use user's slippage setting
     settings = await get_user_settings(tg_id)
@@ -449,7 +469,8 @@ async def cb_exec_trade_with_tpsl(callback: CallbackQuery, state: FSMContext):
         return
 
     notional = float(usdc_amount) * float(leverage)
-    token_amount = _usdc_to_token(notional, price)
+    lot_size = await _get_lot_size(symbol)
+    token_amount = _usdc_to_token(notional, price, lot_size)
 
     settings = await get_user_settings(tg_id)
     slippage = settings.get("slippage", "0.5")
@@ -644,7 +665,8 @@ async def msg_limit_amount(message: Message, state: FSMContext):
 
     price_f = float(limit_price)
     notional = float(raw) * float(leverage)
-    token_amount = _usdc_to_token(notional, price_f)
+    lot_size = await _get_lot_size(symbol)
+    token_amount = _usdc_to_token(notional, price_f, lot_size)
 
     direction = "📗 LIMIT BUY" if side == "bid" else "📕 LIMIT SELL"
     await message.answer(
@@ -678,12 +700,13 @@ async def cb_exec_limit(callback: CallbackQuery):
 
     price_f = float(limit_price)
     notional = float(usdc_amount) * float(leverage)
-    token_amount = _usdc_to_token(notional, price_f)
+    lot_size = await _get_lot_size(symbol)
+    token_amount = _usdc_to_token(notional, price_f, lot_size)
 
     # Convert price to tick level (tick_level = price in integer form)
     # Pacifica uses tick levels — we need market info to properly convert
     try:
-        max_lev, tick_size = await _get_market_info(symbol)
+        max_lev, tick_size, _ = await _get_market_info(symbol)
         tick_level = int(round(price_f / float(tick_size)))
     except Exception:
         tick_level = int(price_f)  # fallback
@@ -1024,7 +1047,8 @@ async def cmd_long(message: Message):
     price = await _get_price(symbol)
     notional = float(usdc) * float(leverage)
     if price:
-        token_amount = _usdc_to_token(notional, price)
+        lot_size = await _get_lot_size(symbol)
+        token_amount = _usdc_to_token(notional, price, lot_size)
         price_line = f"Price: ${price:,.2f}\nToken amount: ~{token_amount} {symbol}\n"
     else:
         price_line = ""
@@ -1060,7 +1084,8 @@ async def cmd_short(message: Message):
     price = await _get_price(symbol)
     notional = float(usdc) * float(leverage)
     if price:
-        token_amount = _usdc_to_token(notional, price)
+        lot_size = await _get_lot_size(symbol)
+        token_amount = _usdc_to_token(notional, price, lot_size)
         price_line = f"Price: ${price:,.2f}\nToken amount: ~{token_amount} {symbol}\n"
     else:
         price_line = ""
