@@ -807,24 +807,49 @@ async def cb_partial_close(callback: CallbackQuery):
             return
 
         close_side = "ask" if pos.get("side") == "bid" else "bid"
+        pos_side = pos.get("side", "bid")
+        entry_price = float(pos.get("entry_price", 0))
         full_amount = abs(float(pos.get("amount", pos.get("size", 0))))
-        partial_amount = round(full_amount * pct / 100, 8)
+
+        # Round partial amount to lot size
+        lot_size = await _get_lot_size(symbol)
+        lot = float(lot_size)
+        import math
+        partial_amount = math.floor(full_amount * pct / 100 / lot) * lot
+        decimals = len(lot_size.split(".")[-1]) if "." in lot_size else 0
+        partial_str = f"{partial_amount:.{decimals}f}" if decimals else str(int(partial_amount))
+
+        close_price = await _get_price(symbol) or 0
 
         settings = await get_user_settings(tg_id)
         slippage = settings.get("slippage", "0.5")
 
         resp = await client.create_market_order(
-            symbol=symbol, side=close_side, amount=str(partial_amount),
+            symbol=symbol, side=close_side, amount=partial_str,
             reduce_only=True, slippage=slippage,
         )
         await client.close()
 
-        await log_trade(tg_id, symbol, close_side, str(partial_amount), order_type="partial_close")
+        # PnL on closed portion
+        pnl_line = ""
+        if close_price and entry_price:
+            if pos_side == "bid":
+                pnl = (close_price - entry_price) * partial_amount
+            else:
+                pnl = (entry_price - close_price) * partial_amount
+            pnl_color = "🟢" if pnl >= 0 else "🔴"
+            pnl_sign = "+" if pnl >= 0 else ""
+            pnl_line = f"PnL: {pnl_color} <b>{pnl_sign}${pnl:,.2f}</b>\n"
 
+        await log_trade(tg_id, symbol, close_side, partial_str, order_type="partial_close")
+
+        remaining = full_amount - partial_amount
         await callback.message.edit_text(  # type: ignore
             f"<b>✅ Closed {pct}% of {symbol}</b>\n\n"
-            f"Amount: {partial_amount} {symbol}\n"
-            f"Remaining: ~{full_amount - partial_amount:.8g} {symbol}",
+            f"Closed: {partial_str} {symbol}\n"
+            f"Close price: ${close_price:,.2f}\n"
+            f"{pnl_line}"
+            f"Remaining: ~{remaining:.{decimals}f} {symbol}",
             reply_markup=main_menu_kb(),
         )
     except PacificaAPIError as e:
@@ -868,7 +893,13 @@ async def cb_exec_close(callback: CallbackQuery):
             return
 
         close_side = "ask" if pos.get("side") == "bid" else "bid"
-        amount = str(abs(float(pos.get("amount", pos.get("size", 0)))))
+        amount_f = abs(float(pos.get("amount", pos.get("size", 0))))
+        amount = str(amount_f)
+        entry_price = float(pos.get("entry_price", 0))
+        pos_side = pos.get("side", "bid")
+
+        # Get current price for PnL calculation
+        close_price = await _get_price(symbol) or 0
 
         settings = await get_user_settings(tg_id)
         slippage = settings.get("slippage", "0.5")
@@ -879,10 +910,26 @@ async def cb_exec_close(callback: CallbackQuery):
         )
         await client.close()
 
+        # Calculate closed PnL
+        pnl_line = ""
+        if close_price and entry_price:
+            if pos_side == "bid":
+                pnl = (close_price - entry_price) * amount_f
+            else:
+                pnl = (entry_price - close_price) * amount_f
+            pnl_color = "🟢" if pnl >= 0 else "🔴"
+            pnl_sign = "+" if pnl >= 0 else ""
+            pnl_line = f"PnL: {pnl_color} <b>{pnl_sign}${pnl:,.2f}</b>\n"
+
         await log_trade(tg_id, symbol, close_side, amount, order_type="market_close")
 
+        direction = "LONG" if pos_side == "bid" else "SHORT"
         await callback.message.edit_text(  # type: ignore
-            f"<b>✅ Position Closed</b>\n\n{symbol} — size {amount}",
+            f"<b>✅ Position Closed</b>\n\n"
+            f"{symbol} {direction} — size {amount}\n"
+            f"Entry: ${entry_price:,.2f}\n"
+            f"Close: ${close_price:,.2f}\n"
+            f"{pnl_line}",
             reply_markup=main_menu_kb(),
         )
     except PacificaAPIError as e:
