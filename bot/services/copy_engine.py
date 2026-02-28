@@ -161,6 +161,24 @@ async def _check_master(bot: Bot, master_wallet: str, followers: list[dict]):
             await _replicate_close(bot, master_wallet, pos, followers)
 
 
+async def _get_total_copy_exposure(user_client: PacificaClient) -> float:
+    """Calculate the user's total USD exposure across all open positions.
+
+    This is used to enforce max_total_usd — protecting against a master
+    spamming hundreds of small trades across different tokens.
+    """
+    try:
+        positions = await user_client.get_positions()
+        total = 0.0
+        for pos in positions:
+            amount = abs(float(pos.get("amount", pos.get("size", 0))))
+            entry = float(pos.get("entry_price", 0))
+            total += amount * entry
+        return total
+    except Exception:
+        return 0.0
+
+
 async def _calculate_copy_amount(
     cfg: dict, symbol: str, master_size: float, price: float, lot_size: str,
     user_client: PacificaClient,
@@ -171,6 +189,7 @@ async def _calculate_copy_amount(
     """
     sizing_mode = cfg.get("sizing_mode", "fixed_usd")
     max_usd = cfg.get("max_position_usd", 1000)
+    max_total_usd = cfg.get("max_total_usd", 5000)
     min_trade_usd = cfg.get("min_trade_usd", 0)
 
     # Check minimum trade filter: skip if master's trade is too small
@@ -205,9 +224,21 @@ async def _calculate_copy_amount(
         copy_token = master_size * multiplier
         copy_usd = _token_to_usd(copy_token, price)
 
-    # Apply max position cap
+    # Apply max per-position cap
     if copy_usd > max_usd:
         copy_usd = max_usd
+
+    # Apply max total exposure cap — check all existing positions
+    current_exposure = await _get_total_copy_exposure(user_client)
+    remaining_budget = max_total_usd - current_exposure
+    if remaining_budget <= 0:
+        logger.info(
+            "User %s at total cap ($%.0f/$%.0f), skipping copy",
+            cfg["telegram_id"], current_exposure, max_total_usd,
+        )
+        return None
+    if copy_usd > remaining_budget:
+        copy_usd = remaining_budget
 
     # Convert USD to token amount
     amount_str = _usd_to_token(copy_usd, price, lot_size)

@@ -40,6 +40,7 @@ _DEFAULT_SETUP = {
     "pct_equity": 5.0,
     "min_trade_usd": 0,
     "max_position_usd": 1000.0,
+    "max_total_usd": 5000.0,
 }
 
 
@@ -75,7 +76,8 @@ def _fmt_setup(setup: dict) -> str:
         f"Master: <code>{wallet}</code>\n"
         f"Mode: {mode.replace('_', ' ').title()}\n"
         f"{size_line}\n"
-        f"Max position: ${setup['max_position_usd']:,.0f}"
+        f"Max per position: ${setup['max_position_usd']:,.0f}\n"
+        f"Max total exposure: ${setup.get('max_total_usd', 5000):,.0f}"
         f"{min_line}\n\n"
         f"Adjust settings or start:"
     )
@@ -289,6 +291,24 @@ async def copy_max_callback(callback: CallbackQuery):
     )
 
 
+@router.callback_query(F.data.startswith("ctotal:"))
+async def copy_total_cap(callback: CallbackQuery):
+    """Set max total exposure cap across all copy positions."""
+    parts = callback.data.split(":")  # type: ignore
+    wallet = parts[1]
+    total_usd = float(parts[2])
+    tg_id = callback.from_user.id
+
+    setup = _get_setup(tg_id, wallet)
+    setup["max_total_usd"] = total_usd
+    await callback.answer(f"Total cap: ${total_usd:,.0f}")
+
+    await callback.message.edit_text(  # type: ignore
+        _fmt_setup(setup),
+        reply_markup=copy_settings_kb(wallet, setup),
+    )
+
+
 @router.callback_query(F.data.startswith("copy_go:"))
 async def copy_start_callback(callback: CallbackQuery):
     tg_id = callback.from_user.id
@@ -309,6 +329,7 @@ async def copy_start_callback(callback: CallbackQuery):
         pct_equity=setup["pct_equity"],
         min_trade_usd=setup.get("min_trade_usd", 0),
         max_position_usd=setup["max_position_usd"],
+        max_total_usd=setup.get("max_total_usd", 5000),
     )
 
     mode = setup["sizing_mode"]
@@ -326,7 +347,8 @@ async def copy_start_callback(callback: CallbackQuery):
     await callback.message.edit_text(  # type: ignore
         f"<b>✅ Copy Active!</b>\n\n"
         f"Master: <code>{setup['wallet']}</code>\n"
-        f"Size: {size_str} | Cap: ${setup['max_position_usd']:,.0f}{min_str}\n\n"
+        f"Size: {size_str} | Cap: ${setup['max_position_usd']:,.0f}{min_str}\n"
+        f"Total exposure limit: ${setup.get('max_total_usd', 5000):,.0f}\n\n"
         f"The bot will automatically mirror their trades.",
         reply_markup=copy_menu_kb(),
     )

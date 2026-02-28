@@ -56,6 +56,7 @@ async def _init_tables(db: aiosqlite.Connection):
             pct_equity REAL DEFAULT 5.0,
             min_trade_usd REAL DEFAULT 0,
             max_position_usd REAL DEFAULT 1000,
+            max_total_usd REAL DEFAULT 5000,
             symbols TEXT DEFAULT '*',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
@@ -104,6 +105,7 @@ async def _init_tables(db: aiosqlite.Connection):
         "ALTER TABLE copy_configs ADD COLUMN fixed_amount_usd REAL DEFAULT 10.0",
         "ALTER TABLE copy_configs ADD COLUMN pct_equity REAL DEFAULT 5.0",
         "ALTER TABLE copy_configs ADD COLUMN min_trade_usd REAL DEFAULT 0",
+        "ALTER TABLE copy_configs ADD COLUMN max_total_usd REAL DEFAULT 5000",
     ]
     for sql in migrations:
         try:
@@ -190,16 +192,19 @@ async def add_copy_config(
     pct_equity: float = 5.0,
     min_trade_usd: float = 0,
     max_position_usd: float = 1000,
+    max_total_usd: float = 5000,
     symbols: str = "*",
 ) -> int:
     db = await get_db()
     cursor = await db.execute(
         """INSERT INTO copy_configs
            (telegram_id, master_wallet, sizing_mode, size_multiplier,
-            fixed_amount_usd, pct_equity, min_trade_usd, max_position_usd, symbols)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            fixed_amount_usd, pct_equity, min_trade_usd, max_position_usd,
+            max_total_usd, symbols)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (telegram_id, master_wallet, sizing_mode, size_multiplier,
-         fixed_amount_usd, pct_equity, min_trade_usd, max_position_usd, symbols),
+         fixed_amount_usd, pct_equity, min_trade_usd, max_position_usd,
+         max_total_usd, symbols),
     )
     await db.commit()
     return cursor.lastrowid  # type: ignore

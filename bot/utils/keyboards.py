@@ -383,11 +383,18 @@ def copy_settings_kb(wallet: str, setup: dict | None = None) -> InlineKeyboardMa
         InlineKeyboardButton(text="Min $500", callback_data=f"cmin:{wallet}:500"),
     ]
 
-    # Max position cap
+    # Max per-position cap
     max_row = [
         InlineKeyboardButton(text="Cap $500", callback_data=f"cx:{wallet}:500"),
         InlineKeyboardButton(text="Cap $1K", callback_data=f"cx:{wallet}:1000"),
         InlineKeyboardButton(text="Cap $5K", callback_data=f"cx:{wallet}:5000"),
+    ]
+
+    # Max total exposure (all copy positions combined)
+    total_row = [
+        InlineKeyboardButton(text="Total $2K", callback_data=f"ctotal:{wallet}:2000"),
+        InlineKeyboardButton(text="Total $5K", callback_data=f"ctotal:{wallet}:5000"),
+        InlineKeyboardButton(text="Total $10K", callback_data=f"ctotal:{wallet}:10000"),
     ]
 
     return InlineKeyboardMarkup(
@@ -396,6 +403,7 @@ def copy_settings_kb(wallet: str, setup: dict | None = None) -> InlineKeyboardMa
             amount_row,
             min_row,
             max_row,
+            total_row,
             [
                 InlineKeyboardButton(text="✅ Start Copying", callback_data=f"copy_go:{wallet}"),
                 InlineKeyboardButton(text="❌ Cancel", callback_data="nav:copy"),
