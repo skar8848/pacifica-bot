@@ -10,9 +10,10 @@ from aiogram.types import Message, CallbackQuery
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
-from database.db import get_user, log_trade, get_user_settings, log_referral_fee, REFERRAL_FEE_SHARE
+from database.db import get_user, update_user, log_trade, get_user_settings, log_referral_fee, REFERRAL_FEE_SHARE
 from bot.models.user import build_client_from_user
 from bot.services.pacifica_client import PacificaAPIError
+from bot.config import PACIFICA_REFERRAL_CODE, BUILDER_CODE, BUILDER_FEE_RATE
 from bot.utils.keyboards import (
     market_detail_kb,
     trade_amount_kb,
@@ -32,6 +33,44 @@ router = Router()
 
 # Approximate taker fee rate on Pacifica (for referral fee tracking)
 _TAKER_FEE_RATE = 0.0004  # 0.04%
+
+
+async def _ensure_beta_claimed(user: dict) -> None:
+    """Auto-claim beta code + approve builder code if not already done.
+
+    Called before every trade to handle the case where the background
+    auto-claim at wallet creation failed (e.g. no deposit yet at that time).
+    """
+    if user.get("builder_approved"):
+        return  # Already done
+
+    tg_id = user["telegram_id"]
+    try:
+        from bot.models.user import build_client_from_user
+        client = build_client_from_user(user)
+        try:
+            # 1) Claim beta / referral code
+            if PACIFICA_REFERRAL_CODE:
+                try:
+                    await client.claim_referral_code(PACIFICA_REFERRAL_CODE)
+                    logger.info("Auto-claimed beta code for user %s before trade", tg_id)
+                except Exception as e:
+                    if "already" not in str(e).lower():
+                        logger.debug("Beta claim before trade failed: %s", e)
+
+            # 2) Approve builder code
+            if BUILDER_CODE:
+                try:
+                    await client.approve_builder_code(BUILDER_CODE, BUILDER_FEE_RATE)
+                    await update_user(tg_id, builder_approved=1)
+                    logger.info("Approved builder code for user %s before trade", tg_id)
+                except Exception as e:
+                    if "already" not in str(e).lower():
+                        logger.debug("Builder approve before trade failed: %s", e)
+        finally:
+            await client.close()
+    except Exception as e:
+        logger.debug("Pre-trade beta/builder setup failed for %s: %s", tg_id, e)
 
 
 async def _track_referral_fee(tg_id: int, symbol: str, notional: float):
@@ -407,6 +446,9 @@ async def cb_execute_trade(callback: CallbackQuery):
 
     await callback.answer("Sending order...")
 
+    # Auto-claim beta code + builder approval if needed
+    await _ensure_beta_claimed(user)
+
     # Convert USDC to token amount
     price = await _get_price(symbol)
     if not price:
@@ -478,6 +520,9 @@ async def cb_exec_trade_with_tpsl(callback: CallbackQuery, state: FSMContext):
         return
 
     await callback.answer("Sending order...")
+
+    # Auto-claim beta code + builder approval if needed
+    await _ensure_beta_claimed(user)
 
     price = await _get_price(symbol)
     if not price:
@@ -718,6 +763,9 @@ async def cb_exec_limit(callback: CallbackQuery):
 
     await callback.answer("Placing limit order...")
 
+    # Auto-claim beta code + builder approval if needed
+    await _ensure_beta_claimed(user)
+
     price_f = float(limit_price)
     notional = float(usdc_amount) * float(leverage)
     lot_size = await _get_lot_size(symbol)
@@ -916,6 +964,9 @@ async def cb_exec_close(callback: CallbackQuery):
 
     await callback.answer("Closing position...")
 
+    # Auto-claim beta code + builder approval if needed
+    await _ensure_beta_claimed(user)
+
     try:
         client = build_client_from_user(user)
         positions = await client.get_positions()
@@ -984,6 +1035,9 @@ async def cb_exec_closeall(callback: CallbackQuery):
         return
 
     await callback.answer("Closing all...")
+
+    # Auto-claim beta code + builder approval if needed
+    await _ensure_beta_claimed(user)
 
     try:
         client = build_client_from_user(user)
