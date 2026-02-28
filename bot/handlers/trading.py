@@ -13,7 +13,7 @@ from aiogram.fsm.state import State, StatesGroup
 from database.db import get_user, update_user, log_trade, get_user_settings, log_referral_fee, REFERRAL_FEE_SHARE
 from bot.models.user import build_client_from_user
 from bot.services.pacifica_client import PacificaAPIError
-from bot.config import PACIFICA_REFERRAL_CODE, BUILDER_CODE, BUILDER_FEE_RATE
+from bot.config import BUILDER_CODE, BUILDER_FEE_RATE
 from bot.utils.keyboards import (
     market_detail_kb,
     trade_amount_kb,
@@ -47,21 +47,11 @@ async def _ensure_beta_claimed(user: dict) -> None:
     tg_id = user["telegram_id"]
     try:
         from bot.models.user import build_client_from_user
+        from bot.handlers.wallet import _try_claim_beta
         client = build_client_from_user(user)
         try:
-            # 1) Claim beta / referral code
-            if PACIFICA_REFERRAL_CODE:
-                try:
-                    await client.claim_referral_code(PACIFICA_REFERRAL_CODE)
-                    logger.info("Auto-claimed beta code for user %s before trade", tg_id)
-                except Exception as e:
-                    err = str(e).lower()
-                    if "already" in err:
-                        pass  # Already claimed
-                    elif "limit" in err:
-                        logger.info("Beta code limit reached for user %s", tg_id)
-                    else:
-                        logger.debug("Beta claim before trade failed: %s", e)
+            # 1) Claim beta via code pool
+            await _try_claim_beta(client, tg_id)
 
             # 2) Approve builder code
             if BUILDER_CODE:

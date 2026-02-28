@@ -36,53 +36,62 @@ logger = logging.getLogger(__name__)
 router = Router()
 
 
+async def _try_claim_beta(client, tg_id: int) -> bool:
+    """Try claiming beta access using the code pool. Returns True if claimed."""
+    from bot.config import BETA_CODE_POOL
+
+    for code in BETA_CODE_POOL:
+        try:
+            await client.claim_referral_code(code)
+            logger.info("Claimed beta code %s for user %s", code, tg_id)
+            return True
+        except Exception as e:
+            err = str(e).lower()
+            if "already" in err:
+                return True  # User already has beta
+            if "limit" in err or "invalid" in err:
+                continue  # Code exhausted or invalid, try next
+            logger.debug("Beta code %s failed for %s: %s", code, tg_id, e)
+            continue
+    return False
+
+
 async def _auto_claim_beta(tg_id: int):
     """Background task: claim beta code + approve builder code with retries."""
     from bot.models.user import build_client_from_user
-    from bot.config import BUILDER_CODE, BUILDER_FEE_RATE, PACIFICA_REFERRAL_CODE
+    from bot.config import BUILDER_CODE, BUILDER_FEE_RATE
 
-    for attempt in range(5):
-        await asyncio.sleep(5 + attempt * 5)  # 5s, 10s, 15s, 20s, 25s
+    for attempt in range(3):
+        await asyncio.sleep(5 + attempt * 5)  # 5s, 10s, 15s
         try:
             u = await get_user(tg_id)
             if not u:
                 return
             bc = build_client_from_user(u)
             try:
-                # Claim beta/referral code
-                if PACIFICA_REFERRAL_CODE:
+                # Claim beta via code pool
+                claimed = await _try_claim_beta(bc, tg_id)
+                if not claimed:
+                    logger.info("All beta codes exhausted for user %s", tg_id)
+
+                # Approve builder code
+                if BUILDER_CODE:
                     try:
-                        await bc.claim_referral_code(PACIFICA_REFERRAL_CODE)
-                        logger.info("Claimed beta code for %s (attempt %d)", tg_id, attempt + 1)
+                        await bc.approve_builder_code(BUILDER_CODE, BUILDER_FEE_RATE)
+                        await update_user(tg_id, builder_approved=1)
+                        logger.info("Approved builder code for %s", tg_id)
                     except Exception as e:
                         err = str(e).lower()
                         if "already" in err:
-                            logger.debug("Beta code already claimed for %s", tg_id)
-                        elif "limit" in err:
-                            logger.info("Beta code limit reached, user %s must enter their own", tg_id)
-                            return  # Don't retry — code is exhausted
-                        else:
+                            await update_user(tg_id, builder_approved=1)
+                        elif "not found" not in err:
                             raise
-
-                # Approve builder code (skip if not registered on Pacifica yet)
-                try:
-                    await bc.approve_builder_code(BUILDER_CODE, BUILDER_FEE_RATE)
-                    await update_user(tg_id, builder_approved=1)
-                    logger.info("Approved builder code for %s (attempt %d)", tg_id, attempt + 1)
-                except Exception as e:
-                    err = str(e).lower()
-                    if "not found" in err:
-                        logger.debug("Builder code '%s' not registered yet, skipping", BUILDER_CODE)
-                    elif "already" in err:
-                        await update_user(tg_id, builder_approved=1)
-                    else:
-                        raise
             finally:
                 await bc.close()
-            return  # success
+            return  # done
         except Exception as e:
             logger.debug("Auto-setup attempt %d for %s: %s", attempt + 1, tg_id, e)
-    logger.warning("Auto-setup failed after 5 attempts for %s", tg_id)
+    logger.warning("Auto-setup failed after 3 attempts for %s", tg_id)
 
 
 class WalletStates(StatesGroup):
@@ -544,7 +553,7 @@ async def wallet_claim_beta(callback: CallbackQuery, state: FSMContext):
     await callback.answer("Claiming beta code...")
 
     from bot.models.user import build_client_from_user
-    from bot.config import BUILDER_CODE, BUILDER_FEE_RATE, PACIFICA_REFERRAL_CODE
+    from bot.config import BUILDER_CODE, BUILDER_FEE_RATE
     from bot.utils.keyboards import InlineKeyboardMarkup, InlineKeyboardButton
 
     beta_claimed = False
@@ -553,38 +562,28 @@ async def wallet_claim_beta(callback: CallbackQuery, state: FSMContext):
     try:
         client = build_client_from_user(user)
         try:
-            # Try default referral code first
-            if PACIFICA_REFERRAL_CODE:
-                try:
-                    await client.claim_referral_code(PACIFICA_REFERRAL_CODE)
-                    results.append(f"✅ Beta code <code>{PACIFICA_REFERRAL_CODE}</code> claimed!")
-                    beta_claimed = True
-                except Exception as e:
-                    err = str(e)
-                    if "already" in err.lower():
-                        results.append("✅ Beta code already claimed")
-                        beta_claimed = True
-                    elif "limit" in err.lower() or "500" in err:
-                        # Code exhausted — ask user for their own code
-                        pass
-                    else:
-                        results.append(f"❌ Beta code: {err}")
-
+            # Try code pool
+            beta_claimed = await _try_claim_beta(client, callback.from_user.id)
             if beta_claimed:
-                # Approve builder code
+                results.append("✅ Beta access activated!")
+            else:
+                results.append("All codes exhausted")
+
+            # Approve builder code
+            if BUILDER_CODE:
                 try:
                     await client.approve_builder_code(BUILDER_CODE, BUILDER_FEE_RATE)
                     await update_user(callback.from_user.id, builder_approved=1)
                     results.append(f"✅ Builder code <code>{BUILDER_CODE}</code> approved!")
                 except Exception as e:
-                    err = str(e)
-                    if "already" in err.lower():
+                    err = str(e).lower()
+                    if "already" in err:
                         results.append("✅ Builder code already approved")
                         await update_user(callback.from_user.id, builder_approved=1)
-                    elif "not found" in err.lower():
+                    elif "not found" in err:
                         results.append(f"⏳ Builder code <code>{BUILDER_CODE}</code> not registered on Pacifica yet")
                     else:
-                        results.append(f"❌ Builder code: {err}")
+                        results.append(f"❌ Builder code: {str(e)}")
         finally:
             await client.close()
     except Exception as e:
@@ -598,9 +597,9 @@ async def wallet_claim_beta(callback: CallbackQuery, state: FSMContext):
         ])
         await callback.message.edit_text(  # type: ignore
             "<b>Beta Activation</b>\n\n"
-            "The default beta code has reached its limit.\n\n"
-            "Please enter your Pacifica referral/beta code below.\n"
-            "You can get one from the Pacifica Discord or from another user.",
+            "All built-in codes are used up.\n\n"
+            "Please paste your Pacifica referral code below.\n"
+            "Get one from the Pacifica Discord.",
             reply_markup=kb,
         )
         return
