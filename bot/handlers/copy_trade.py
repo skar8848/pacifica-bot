@@ -1,6 +1,6 @@
 """
-Copy trading handlers: /copy, /unfollow, /masters, /copylog
-With FSM for interactive wallet paste.
+Copy trading — /copy, /unfollow, /masters, /copylog
+Leaderboard — /top, /inspect, nav:leaderboard
 
 Sizing modes:
   - fixed_usd: fixed dollar amount per trade (e.g. $10)
@@ -8,12 +8,13 @@ Sizing modes:
   - proportional: multiply master's position size (e.g. 0.5x)
 """
 
+import asyncio
 import logging
 import re
 
 from aiogram import Router, F
 from aiogram.filters import Command
-from aiogram.types import Message, CallbackQuery
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
@@ -24,7 +25,9 @@ from database.db import (
     deactivate_copy_config,
     get_trade_history,
 )
-from bot.utils.keyboards import copy_settings_kb, copy_menu_kb, main_menu_kb
+from bot.services.market_data import _get_client
+from bot.utils.keyboards import copy_settings_kb, copy_menu_kb, main_menu_kb, back_to_menu_kb
+from bot.utils.formatters import fmt_leaderboard
 
 logger = logging.getLogger(__name__)
 router = Router()
@@ -43,20 +46,30 @@ _DEFAULT_SETUP = {
     "max_total_usd": 5000.0,
 }
 
+_SORT_MAP = {
+    "pnl": ("pnl_all_time", "All-Time PnL"),
+    "pnl7d": ("pnl_7d", "7-Day PnL"),
+    "pnl1d": ("pnl_1d", "1-Day PnL"),
+    "volume": ("volume_all_time", "All-Time Volume"),
+    "equity": ("equity_current", "Equity"),
+}
+
 
 class CopyStates(StatesGroup):
     waiting_wallet = State()
 
 
+# ------------------------------------------------------------------
+# Helpers
+# ------------------------------------------------------------------
+
 def _get_setup(tg_id: int, wallet: str = "") -> dict:
-    """Get or create setup for a user."""
     if tg_id not in _copy_setup:
         _copy_setup[tg_id] = {**_DEFAULT_SETUP, "wallet": wallet}
     return _copy_setup[tg_id]
 
 
 def _fmt_setup(setup: dict) -> str:
-    """Format setup summary for display."""
     wallet = setup["wallet"]
     mode = setup["sizing_mode"]
 
@@ -81,6 +94,329 @@ def _fmt_setup(setup: dict) -> str:
         f"{min_line}\n\n"
         f"Adjust settings or start:"
     )
+
+
+def _fmt_top_traders(traders: list, sort_by: str = "pnl") -> str:
+    """Format top traders list (shared between /top and refresh callback)."""
+    sort_key, sort_label = _SORT_MAP.get(sort_by, _SORT_MAP["pnl"])
+    traders.sort(key=lambda t: float(t.get(sort_key, 0)), reverse=True)
+
+    text = f"<b>🏆 Top Traders — {sort_label}</b>\n\n"
+    for i, t in enumerate(traders[:10], 1):
+        addr = t.get("address", "?")
+        val = float(t.get(sort_key, 0))
+        equity = float(t.get("equity_current", 0))
+        sign = "+" if val >= 0 else ""
+        emoji = "🟢" if val >= 0 else "🔴"
+        val_str = f"{sign}${val:,.0f}" if sort_key.startswith("pnl") else f"${val:,.0f}"
+        short = f"{addr[:6]}...{addr[-4:]}"
+        text += (
+            f"<b>{i}.</b> {emoji} {short}\n"
+            f"   <code>{addr}</code>\n"
+            f"   {sort_label}: {val_str} | Equity: ${equity:,.0f}\n\n"
+        )
+
+    text += (
+        f"<i>Sort: /top pnl | /top pnl7d | /top volume | /top equity</i>\n"
+        f"<i>Tap address to copy, then /inspect &lt;wallet&gt;</i>"
+    )
+    return text
+
+
+def _top_kb(sort_by: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="🔄 Refresh", callback_data=f"top:{sort_by}"),
+            InlineKeyboardButton(text="◀️ Menu", callback_data="nav:menu"),
+        ],
+    ])
+
+
+def _inspect_kb(wallet: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="👥 Copy This Trader", callback_data=f"copy:start:{wallet}"),
+            InlineKeyboardButton(text="🔄 Refresh", callback_data=f"inspect:{wallet}"),
+        ],
+        [InlineKeyboardButton(text="◀️ Menu", callback_data="nav:menu")],
+    ])
+
+
+# ------------------------------------------------------------------
+# Leaderboard (nav:leaderboard button)
+# ------------------------------------------------------------------
+
+@router.callback_query(F.data == "nav:leaderboard")
+async def nav_leaderboard(callback: CallbackQuery):
+    await callback.answer("Loading top traders...")
+
+    text = ""
+    try:
+        client = await _get_client()
+        traders = await client.get_leaderboard()
+        text = fmt_leaderboard(traders)
+    except Exception:
+        pass
+
+    if not text or text == "No leaderboard data.":
+        from database.db import get_db
+        db = await get_db()
+        async with db.execute(
+            """SELECT u.username, u.pacifica_account, COUNT(t.id) as trades
+               FROM users u LEFT JOIN trade_log t ON u.telegram_id = t.telegram_id
+               WHERE u.pacifica_account IS NOT NULL
+               GROUP BY u.telegram_id ORDER BY trades DESC LIMIT 10"""
+        ) as cursor:
+            rows = await cursor.fetchall()
+
+        if rows:
+            text = "<b>🏆 Top Traders</b>\n\n"
+            for i, row in enumerate(rows, 1):
+                name = row[0] or f"{row[1][:6]}...{row[1][-4:]}"
+                text += f"<b>{i}.</b> @{name} — {row[2]} trades\n"
+        else:
+            text = "<b>🏆 Top Traders</b>\n\nNo traders yet. Be the first!"
+
+    if len(text) > 4000:
+        text = text[:4000] + "\n..."
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="◀️ Copy Trading", callback_data="nav:copy"),
+            InlineKeyboardButton(text="◀️ Menu", callback_data="nav:menu"),
+        ],
+    ])
+    await callback.message.edit_text(text, reply_markup=kb)  # type: ignore
+
+
+# ------------------------------------------------------------------
+# /top — top traders with sorting
+# ------------------------------------------------------------------
+
+@router.message(Command("top"))
+async def cmd_top(message: Message):
+    args = (message.text or "").split()
+    sort_by = args[1].lower() if len(args) > 1 else "pnl"
+
+    await message.answer("Loading top traders...")
+
+    try:
+        client = await _get_client()
+        traders = await client.get_leaderboard(limit=100)
+    except Exception as e:
+        await message.answer(f"Error: {e}", reply_markup=back_to_menu_kb())
+        return
+
+    if not traders:
+        await message.answer("No top traders data available.", reply_markup=main_menu_kb())
+        return
+
+    await message.answer(_fmt_top_traders(traders, sort_by), reply_markup=_top_kb(sort_by))
+
+
+@router.callback_query(F.data.startswith("top:"))
+async def cb_top_refresh(callback: CallbackQuery):
+    sort_by = callback.data.split(":")[1]  # type: ignore
+    await callback.answer("Refreshing...")
+
+    try:
+        client = await _get_client()
+        traders = await client.get_leaderboard(limit=100)
+    except Exception as e:
+        await callback.message.edit_text(f"Error: {e}", reply_markup=back_to_menu_kb())  # type: ignore
+        return
+
+    await callback.message.edit_text(  # type: ignore
+        _fmt_top_traders(traders, sort_by), reply_markup=_top_kb(sort_by),
+    )
+
+
+# ------------------------------------------------------------------
+# /inspect <wallet> — inspect a trader's positions & stats
+# ------------------------------------------------------------------
+
+async def _build_inspect_text(wallet: str) -> str:
+    """Build the inspect text for a wallet address."""
+    client = await _get_client()
+
+    acc_task = asyncio.create_task(client.get_account_info(account=wallet))
+    pos_task = asyncio.create_task(client.get_positions(account=wallet))
+    trades_task = asyncio.create_task(client.get_trades_history(account=wallet, limit=10))
+
+    account = await acc_task
+    positions = await pos_task
+    trades = await trades_task
+
+    equity = float(account.get("equity", 0))
+    balance = float(account.get("balance", 0))
+    margin_used = float(account.get("margin_used", 0))
+    unrealized_pnl = float(account.get("unrealized_pnl", 0))
+    upnl_sign = "+" if unrealized_pnl >= 0 else ""
+
+    text = (
+        f"<b>🔍 Trader: <code>{wallet[:8]}...{wallet[-4:]}</code></b>\n\n"
+        f"💰 Equity: <b>${equity:,.2f}</b>\n"
+        f"💵 Balance: ${balance:,.2f}\n"
+        f"📊 Margin used: ${margin_used:,.2f}\n"
+        f"📈 Unrealized PnL: {upnl_sign}${unrealized_pnl:,.2f}\n\n"
+    )
+
+    if positions:
+        text += f"<b>📋 Open Positions ({len(positions)})</b>\n"
+        for p in positions[:8]:
+            sym = p.get("symbol", "?")
+            side = "LONG" if p.get("side") == "bid" else "SHORT"
+            side_emoji = "🟢" if p.get("side") == "bid" else "🔴"
+            amt = abs(float(p.get("amount", 0)))
+            entry = float(p.get("entry_price", 0))
+            lev = p.get("leverage", "?")
+            notional = amt * entry
+            text += (
+                f"  {side_emoji} {sym} {side} {lev}x\n"
+                f"    Size: {amt} (${notional:,.0f}) | Entry: ${entry:,.2f}\n"
+            )
+        if len(positions) > 8:
+            text += f"  <i>... +{len(positions) - 8} more</i>\n"
+    else:
+        text += "<i>No open positions</i>\n"
+
+    if trades:
+        text += f"\n<b>📜 Recent Trades</b>\n"
+        for t in trades[:5]:
+            sym = t.get("symbol", "?")
+            side = t.get("side", "?")
+            price = float(t.get("price", 0))
+            pnl = float(t.get("pnl", 0))
+            pnl_str = f" | PnL: {'+'if pnl >= 0 else ''}{pnl:,.2f}" if pnl else ""
+            text += f"  {sym} {side} @${price:,.2f}{pnl_str}\n"
+
+    if len(text) > 4000:
+        text = text[:4000] + "\n..."
+
+    return text
+
+
+@router.message(Command("inspect"))
+async def cmd_inspect(message: Message):
+    args = (message.text or "").split()
+    if len(args) < 2:
+        await message.answer(
+            "<b>Usage:</b> <code>/inspect &lt;wallet_address&gt;</code>\n\n"
+            "Find wallets with /top or the leaderboard.",
+            reply_markup=main_menu_kb(),
+        )
+        return
+
+    wallet = args[1].strip()
+    await message.answer(f"Inspecting <code>{wallet[:8]}...</code>...")
+
+    try:
+        text = await _build_inspect_text(wallet)
+    except Exception as e:
+        await message.answer(f"Error: {e}", reply_markup=back_to_menu_kb())
+        return
+
+    await message.answer(text, reply_markup=_inspect_kb(wallet))
+
+
+@router.callback_query(F.data.startswith("inspect:"))
+async def cb_inspect(callback: CallbackQuery):
+    wallet = callback.data.split(":", 1)[1]  # type: ignore
+    await callback.answer("Refreshing...")
+
+    try:
+        text = await _build_inspect_text(wallet)
+    except Exception as e:
+        await callback.message.edit_text(f"Error: {e}", reply_markup=back_to_menu_kb())  # type: ignore
+        return
+
+    await callback.message.edit_text(text, reply_markup=_inspect_kb(wallet))  # type: ignore
+
+
+# ------------------------------------------------------------------
+# copy:start — direct copy from inspect view
+# ------------------------------------------------------------------
+
+@router.callback_query(F.data.startswith("copy:start:"))
+async def cb_copy_start_direct(callback: CallbackQuery):
+    wallet = callback.data.split(":", 2)[2]  # type: ignore
+    tg_id = callback.from_user.id
+    await callback.answer()
+
+    setup = _get_setup(tg_id, wallet)
+    setup["wallet"] = wallet
+
+    await callback.message.edit_text(  # type: ignore
+        _fmt_setup(setup),
+        reply_markup=copy_settings_kb(wallet, setup),
+    )
+
+
+# ------------------------------------------------------------------
+# copy:add / copy:masters / copy:log — button callbacks
+# ------------------------------------------------------------------
+
+@router.callback_query(F.data == "copy:add")
+async def copy_add(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await state.set_state(CopyStates.waiting_wallet)
+    await callback.message.answer(  # type: ignore
+        "<b>👥 Copy a Wallet</b>\n\n"
+        "Paste the wallet address of the trader you want to copy.\n"
+        "You can find top traders in 🏆 Top Traders."
+    )
+
+
+@router.callback_query(F.data == "copy:masters")
+async def copy_masters(callback: CallbackQuery):
+    await callback.answer()
+    configs = await get_active_copy_configs(callback.from_user.id)
+
+    if not configs:
+        await callback.message.edit_text(  # type: ignore
+            "<b>👥 My Masters</b>\n\n"
+            "You're not copying anyone yet.\n"
+            "Use ➕ Copy a Wallet to start.",
+            reply_markup=copy_menu_kb(),
+        )
+        return
+
+    text = "<b>👥 My Masters</b>\n\n"
+    for cfg in configs:
+        w = cfg["master_wallet"]
+        mode = cfg.get("sizing_mode", "proportional")
+        if mode == "fixed_usd":
+            size = f"${cfg.get('fixed_amount_usd', 10):.0f}/trade"
+        elif mode == "pct_equity":
+            size = f"{cfg.get('pct_equity', 5):.0f}% equity"
+        else:
+            size = f"{cfg['size_multiplier']}x"
+        text += (
+            f"<code>{w[:8]}...{w[-4:]}</code>\n"
+            f"  {size} | Cap ${cfg['max_position_usd']:,.0f}\n"
+            f"  /unfollow <code>{w}</code>\n\n"
+        )
+    await callback.message.edit_text(text, reply_markup=copy_menu_kb())  # type: ignore
+
+
+@router.callback_query(F.data == "copy:log")
+async def copy_log_cb(callback: CallbackQuery):
+    await callback.answer()
+    trades = await get_trade_history(callback.from_user.id, limit=20)
+    copy_trades = [t for t in trades if t["is_copy_trade"]]
+
+    if not copy_trades:
+        text = "<b>📜 Copy Log</b>\n\nNo copy trades yet."
+    else:
+        text = "<b>📜 Copy Log</b>\n\n"
+        for t in copy_trades:
+            side_label = "BUY" if t["side"] == "bid" else "SELL"
+            text += (
+                f"{t['symbol']} {side_label} {t['amount']} ({t['order_type']})\n"
+                f"  Master: <code>{t['master_wallet'][:8]}...</code>\n"
+            )
+
+    await callback.message.edit_text(text, reply_markup=copy_menu_kb())  # type: ignore
 
 
 # ------------------------------------------------------------------
@@ -110,7 +446,7 @@ async def msg_copy_wallet(message: Message, state: FSMContext):
 
 
 # ------------------------------------------------------------------
-# /copy command (still works as shortcut)
+# /copy command
 # ------------------------------------------------------------------
 
 @router.message(Command("copy"))
@@ -138,7 +474,6 @@ async def cmd_copy(message: Message):
     setup = _get_setup(tg_id, wallet)
     setup["wallet"] = wallet
 
-    # Parse optional sizing arg
     if len(args) > 2:
         raw = args[2]
         if raw.startswith("$"):
@@ -160,7 +495,6 @@ async def cmd_copy(message: Message):
             except ValueError:
                 pass
 
-    # Parse max= and min= args
     for arg in args[2:]:
         match_max = re.match(r"max=(\d+\.?\d*)", arg, re.IGNORECASE)
         match_min = re.match(r"min=(\d+\.?\d*)", arg, re.IGNORECASE)
@@ -176,147 +510,88 @@ async def cmd_copy(message: Message):
 
 
 # ------------------------------------------------------------------
-# Settings callbacks — mode, amounts, filters
+# Settings callbacks
 # ------------------------------------------------------------------
 
 @router.callback_query(F.data.startswith("cmode:"))
 async def copy_mode_callback(callback: CallbackQuery):
-    """Switch sizing mode."""
     parts = callback.data.split(":")  # type: ignore
-    wallet = parts[1]
-    mode = parts[2]
-    tg_id = callback.from_user.id
-
-    setup = _get_setup(tg_id, wallet)
+    wallet, mode = parts[1], parts[2]
+    setup = _get_setup(callback.from_user.id, wallet)
     setup["sizing_mode"] = mode
     await callback.answer(f"Mode: {mode.replace('_', ' ').title()}")
-
-    await callback.message.edit_text(  # type: ignore
-        _fmt_setup(setup),
-        reply_markup=copy_settings_kb(wallet, setup),
-    )
+    await callback.message.edit_text(_fmt_setup(setup), reply_markup=copy_settings_kb(wallet, setup))  # type: ignore
 
 
 @router.callback_query(F.data.startswith("camt:"))
 async def copy_fixed_amount(callback: CallbackQuery):
-    """Set fixed USD amount."""
     parts = callback.data.split(":")  # type: ignore
-    wallet = parts[1]
-    amount = float(parts[2])
-    tg_id = callback.from_user.id
-
-    setup = _get_setup(tg_id, wallet)
+    wallet, amount = parts[1], float(parts[2])
+    setup = _get_setup(callback.from_user.id, wallet)
     setup["sizing_mode"] = "fixed_usd"
     setup["fixed_amount_usd"] = amount
     await callback.answer(f"${amount}/trade")
-
-    await callback.message.edit_text(  # type: ignore
-        _fmt_setup(setup),
-        reply_markup=copy_settings_kb(wallet, setup),
-    )
+    await callback.message.edit_text(_fmt_setup(setup), reply_markup=copy_settings_kb(wallet, setup))  # type: ignore
 
 
 @router.callback_query(F.data.startswith("cpct:"))
 async def copy_pct_equity(callback: CallbackQuery):
-    """Set % equity per trade."""
     parts = callback.data.split(":")  # type: ignore
-    wallet = parts[1]
-    pct = float(parts[2])
-    tg_id = callback.from_user.id
-
-    setup = _get_setup(tg_id, wallet)
+    wallet, pct = parts[1], float(parts[2])
+    setup = _get_setup(callback.from_user.id, wallet)
     setup["sizing_mode"] = "pct_equity"
     setup["pct_equity"] = pct
     await callback.answer(f"{pct}% of equity")
-
-    await callback.message.edit_text(  # type: ignore
-        _fmt_setup(setup),
-        reply_markup=copy_settings_kb(wallet, setup),
-    )
+    await callback.message.edit_text(_fmt_setup(setup), reply_markup=copy_settings_kb(wallet, setup))  # type: ignore
 
 
 @router.callback_query(F.data.startswith("cm:"))
 async def copy_mult_callback(callback: CallbackQuery):
-    """Set proportional multiplier."""
     parts = callback.data.split(":")  # type: ignore
-    wallet = parts[1]
-    mult = float(parts[2])
-    tg_id = callback.from_user.id
-
-    setup = _get_setup(tg_id, wallet)
+    wallet, mult = parts[1], float(parts[2])
+    setup = _get_setup(callback.from_user.id, wallet)
     setup["sizing_mode"] = "proportional"
     setup["size_multiplier"] = mult
     await callback.answer(f"Multiplier: {mult}x")
-
-    await callback.message.edit_text(  # type: ignore
-        _fmt_setup(setup),
-        reply_markup=copy_settings_kb(wallet, setup),
-    )
+    await callback.message.edit_text(_fmt_setup(setup), reply_markup=copy_settings_kb(wallet, setup))  # type: ignore
 
 
 @router.callback_query(F.data.startswith("cmin:"))
 async def copy_min_trade(callback: CallbackQuery):
-    """Set minimum master trade size to trigger copy."""
     parts = callback.data.split(":")  # type: ignore
-    wallet = parts[1]
-    min_usd = float(parts[2])
-    tg_id = callback.from_user.id
-
-    setup = _get_setup(tg_id, wallet)
+    wallet, min_usd = parts[1], float(parts[2])
+    setup = _get_setup(callback.from_user.id, wallet)
     setup["min_trade_usd"] = min_usd
     label = "Off" if min_usd == 0 else f"${min_usd:.0f}"
     await callback.answer(f"Min trigger: {label}")
-
-    await callback.message.edit_text(  # type: ignore
-        _fmt_setup(setup),
-        reply_markup=copy_settings_kb(wallet, setup),
-    )
+    await callback.message.edit_text(_fmt_setup(setup), reply_markup=copy_settings_kb(wallet, setup))  # type: ignore
 
 
 @router.callback_query(F.data.startswith("cx:"))
 async def copy_max_callback(callback: CallbackQuery):
-    """Set max position cap."""
     parts = callback.data.split(":")  # type: ignore
-    wallet = parts[1]
-    max_usd = float(parts[2])
-    tg_id = callback.from_user.id
-
-    setup = _get_setup(tg_id, wallet)
+    wallet, max_usd = parts[1], float(parts[2])
+    setup = _get_setup(callback.from_user.id, wallet)
     setup["max_position_usd"] = max_usd
     await callback.answer(f"Cap: ${max_usd:,.0f}")
-
-    await callback.message.edit_text(  # type: ignore
-        _fmt_setup(setup),
-        reply_markup=copy_settings_kb(wallet, setup),
-    )
+    await callback.message.edit_text(_fmt_setup(setup), reply_markup=copy_settings_kb(wallet, setup))  # type: ignore
 
 
 @router.callback_query(F.data.startswith("ctotal:"))
 async def copy_total_cap(callback: CallbackQuery):
-    """Set max total exposure cap across all copy positions."""
     parts = callback.data.split(":")  # type: ignore
-    wallet = parts[1]
-    total_usd = float(parts[2])
-    tg_id = callback.from_user.id
-
-    setup = _get_setup(tg_id, wallet)
+    wallet, total_usd = parts[1], float(parts[2])
+    setup = _get_setup(callback.from_user.id, wallet)
     setup["max_total_usd"] = total_usd
     await callback.answer(f"Total cap: ${total_usd:,.0f}")
-
-    await callback.message.edit_text(  # type: ignore
-        _fmt_setup(setup),
-        reply_markup=copy_settings_kb(wallet, setup),
-    )
+    await callback.message.edit_text(_fmt_setup(setup), reply_markup=copy_settings_kb(wallet, setup))  # type: ignore
 
 
 @router.callback_query(F.data.startswith("copy_go:"))
 async def copy_start_callback(callback: CallbackQuery):
     tg_id = callback.from_user.id
     wallet = callback.data.split(":", 1)[1]  # type: ignore
-    setup = _copy_setup.pop(tg_id, None)
-
-    if not setup:
-        setup = {**_DEFAULT_SETUP, "wallet": wallet}
+    setup = _copy_setup.pop(tg_id, None) or {**_DEFAULT_SETUP, "wallet": wallet}
 
     await callback.answer("Starting copy...")
 
@@ -355,7 +630,7 @@ async def copy_start_callback(callback: CallbackQuery):
 
 
 # ------------------------------------------------------------------
-# /unfollow, /masters, /copylog commands
+# /unfollow, /masters, /copylog
 # ------------------------------------------------------------------
 
 @router.message(Command("unfollow"))
@@ -364,7 +639,6 @@ async def cmd_unfollow(message: Message):
     if len(args) < 2:
         await message.answer("Usage: /unfollow <wallet_address>", reply_markup=copy_menu_kb())
         return
-
     wallet = args[1]
     tg_id = message.from_user.id  # type: ignore
     await deactivate_copy_config(tg_id, wallet)

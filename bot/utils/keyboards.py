@@ -77,7 +77,7 @@ def markets_kb(markets: list, prices: dict | None = None) -> InlineKeyboardMarku
         ])
 
     rows.append([
-        InlineKeyboardButton(text="🏆 Leaderboard", callback_data="nav:leaderboard"),
+        InlineKeyboardButton(text="🏆 Top Traders", callback_data="nav:leaderboard"),
         InlineKeyboardButton(text="🔄 Refresh", callback_data="nav:markets"),
     ])
     rows.append([InlineKeyboardButton(text="◀️ Menu", callback_data="nav:menu")])
@@ -320,6 +320,9 @@ def close_all_kb() -> InlineKeyboardMarkup:
 def copy_menu_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
+            [
+                InlineKeyboardButton(text="🏆 Top Traders", callback_data="nav:leaderboard"),
+            ],
             [
                 InlineKeyboardButton(text="➕ Copy a Wallet", callback_data="copy:add"),
                 InlineKeyboardButton(text="👥 My Masters", callback_data="copy:masters"),

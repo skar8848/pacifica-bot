@@ -243,9 +243,46 @@ class PacificaClient:
         )
 
     async def claim_referral_code(self, code: str) -> dict:
-        """Claim a referral code for beta/whitelist access."""
+        """Claim a referral code for beta/whitelist access.
+
+        When using agent wallet mode, we claim for the SIGNER (agent wallet)
+        because Pacifica checks beta access on the signer, not the account.
+        We also try to claim for the main account for completeness.
+        """
         header = self._make_header("claim_referral_code")
         payload = {"code": code}
+
+        if self.agent_wallet:
+            # 1. Claim for the signer (agent wallet) — Pacifica checks beta on signer
+            logger.info(
+                "Claiming beta for signer %s (account=%s)",
+                self.agent_wallet, self.account,
+            )
+            _, sig1 = sign_message(header, payload, self.keypair)
+            body_signer = {
+                "account": self.agent_wallet,
+                "agent_wallet": None,
+                "signature": sig1,
+                "timestamp": header["timestamp"],
+                "expiry_window": header["expiry_window"],
+                **payload,
+            }
+            result = await self._post("/referral/user/code/claim", body_signer)
+            logger.info("Beta claimed for signer %s", self.agent_wallet)
+
+            # 2. Also claim for the main account (best effort, uses a second code)
+            try:
+                header2 = self._make_header("claim_referral_code")
+                await self._post(
+                    "/referral/user/code/claim",
+                    self._build_request(header2, payload),
+                )
+                logger.info("Beta also claimed for account %s", self.account)
+            except Exception as e:
+                logger.debug("Main account beta claim (secondary): %s", e)
+
+            return result
+
         return await self._post(
             "/referral/user/code/claim",
             self._build_request(header, payload),

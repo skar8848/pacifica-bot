@@ -13,6 +13,8 @@ from aiogram.fsm.state import State, StatesGroup
 from database.db import get_user, update_user, log_trade, get_user_settings, log_referral_fee, REFERRAL_FEE_SHARE
 from bot.models.user import build_client_from_user
 from bot.services.pacifica_client import PacificaAPIError
+from bot.services.market_data import get_price, get_market_info, get_lot_size, get_max_leverage, usd_to_token
+from bot.handlers.wallet import ensure_beta_and_builder
 from bot.config import BUILDER_CODE, BUILDER_FEE_RATE
 from bot.utils.keyboards import (
     market_detail_kb,
@@ -33,42 +35,6 @@ router = Router()
 
 # Approximate taker fee rate on Pacifica (for referral fee tracking)
 _TAKER_FEE_RATE = 0.0004  # 0.04%
-
-
-async def _ensure_beta_claimed(user: dict) -> None:
-    """Auto-claim beta code + approve builder code if not already done.
-
-    Called before every trade to handle the case where the background
-    auto-claim at wallet creation failed (e.g. no deposit yet at that time).
-    """
-    if user.get("builder_approved"):
-        return  # Already done
-
-    tg_id = user["telegram_id"]
-    try:
-        from bot.models.user import build_client_from_user
-        from bot.handlers.wallet import _try_claim_beta
-        client = build_client_from_user(user)
-        try:
-            # 1) Claim beta via code pool
-            await _try_claim_beta(client, tg_id)
-
-            # 2) Approve builder code
-            if BUILDER_CODE:
-                try:
-                    await client.approve_builder_code(BUILDER_CODE, BUILDER_FEE_RATE)
-                    await update_user(tg_id, builder_approved=1)
-                    logger.info("Approved builder code for user %s before trade", tg_id)
-                except Exception as e:
-                    err = str(e).lower()
-                    if "already" in err:
-                        await update_user(tg_id, builder_approved=1)
-                    elif "not found" not in err:
-                        logger.debug("Builder approve before trade failed: %s", e)
-        finally:
-            await client.close()
-    except Exception as e:
-        logger.debug("Pre-trade beta/builder setup failed for %s: %s", tg_id, e)
 
 
 async def _track_referral_fee(tg_id: int, symbol: str, notional: float):
@@ -97,99 +63,12 @@ class TradeStates(StatesGroup):
     waiting_auto_sl = State()
 
 
-_price_client: "PacificaClient | None" = None
-
-async def _get_price(symbol: str) -> float | None:
-    """Fetch latest price for a symbol.
-
-    Tries /trades first (most accurate), then falls back to /info/prices
-    which covers all markets including low-volume ones like PLTR.
-    """
-    global _price_client
-    try:
-        from bot.services.pacifica_client import PacificaClient
-        if _price_client is None or (_price_client._session and _price_client._session.closed):
-            from solders.keypair import Keypair
-            _price_client = PacificaClient(account="public", keypair=Keypair())
-
-        # Try recent trades first (most accurate)
-        try:
-            trades = await _price_client.get_trades(symbol, limit=1)
-            if trades:
-                return float(trades[0]["price"])
-        except Exception:
-            pass
-
-        # Fallback: /info/prices covers all markets
-        try:
-            prices = await _price_client.get_prices()
-            if isinstance(prices, list):
-                p = next((x for x in prices if x.get("symbol") == symbol), None)
-                if p:
-                    return float(p.get("mark_price") or p.get("index_price") or p.get("price", 0))
-            elif isinstance(prices, dict):
-                if symbol in prices:
-                    return float(prices[symbol])
-        except Exception:
-            pass
-    except Exception:
-        pass
-    return None
-
-
-async def _get_max_leverage(symbol: str) -> int:
-    """Fetch max leverage for a symbol."""
-    max_lev, _, _ = await _get_market_info(symbol)
-    return max_lev
-
-
-async def _get_market_info(symbol: str) -> tuple[int, str, str]:
-    """Fetch max leverage, tick_size, and lot_size for a symbol."""
-    try:
-        from solders.keypair import Keypair
-        from bot.services.pacifica_client import PacificaClient
-        client = PacificaClient(account="public", keypair=Keypair())
-        markets = await client.get_markets_info()
-        await client.close()
-        m = next((x for x in markets if x.get("symbol") == symbol), None)
-        if m:
-            return (
-                int(m.get("max_leverage", 50)),
-                str(m.get("tick_size", "1")),
-                str(m.get("lot_size", "0.01")),
-            )
-    except Exception:
-        pass
-    return 50, "1", "0.01"
-
-
-# Cache lot sizes per symbol (populated on first market info fetch)
-_lot_sizes: dict[str, str] = {}
-
-
-async def _get_lot_size(symbol: str) -> str:
-    """Get lot size for a symbol, using cache or fetching from API."""
-    if symbol in _lot_sizes:
-        return _lot_sizes[symbol]
-    _, _, lot = await _get_market_info(symbol)
-    _lot_sizes[symbol] = lot
-    return lot
-
-
-def _usdc_to_token(usdc_amount: float, price: float, lot_size: str = "0.01") -> str:
-    """Convert USDC notional to token amount, rounded down to lot size."""
-    if price <= 0:
-        return "0"
-    raw = usdc_amount / price
-    lot = float(lot_size)
-    # Round DOWN to lot size (avoid exceeding balance)
-    import math
-    rounded = math.floor(raw / lot) * lot
-    if lot >= 1:
-        return str(int(rounded))
-    else:
-        decimals = len(lot_size.split(".")[-1]) if "." in lot_size else 0
-        return f"{rounded:.{decimals}f}"
+# Aliases for backward compat within this file
+_get_price = get_price
+_get_max_leverage = get_max_leverage
+_get_market_info = get_market_info
+_get_lot_size = get_lot_size
+_usdc_to_token = usd_to_token
 
 
 # ------------------------------------------------------------------
@@ -505,7 +384,7 @@ async def cb_execute_trade(callback: CallbackQuery):
     await callback.answer("Sending order...")
 
     # Auto-claim beta code + builder approval if needed
-    await _ensure_beta_claimed(user)
+    await ensure_beta_and_builder(user)
 
     # Convert USDC to token amount
     price = await _get_price(symbol)
@@ -580,7 +459,7 @@ async def cb_exec_trade_with_tpsl(callback: CallbackQuery, state: FSMContext):
     await callback.answer("Sending order...")
 
     # Auto-claim beta code + builder approval if needed
-    await _ensure_beta_claimed(user)
+    await ensure_beta_and_builder(user)
 
     price = await _get_price(symbol)
     if not price:
@@ -822,7 +701,7 @@ async def cb_exec_limit(callback: CallbackQuery):
     await callback.answer("Placing limit order...")
 
     # Auto-claim beta code + builder approval if needed
-    await _ensure_beta_claimed(user)
+    await ensure_beta_and_builder(user)
 
     price_f = float(limit_price)
     notional = float(usdc_amount) * float(leverage)
@@ -1100,7 +979,7 @@ async def cb_exec_close(callback: CallbackQuery):
     await callback.answer("Closing position...")
 
     # Auto-claim beta code + builder approval if needed
-    await _ensure_beta_claimed(user)
+    await ensure_beta_and_builder(user)
 
     client = build_client_from_user(user)
     try:
@@ -1211,7 +1090,7 @@ async def cb_exec_closeall(callback: CallbackQuery):
     await callback.answer("Closing all...")
 
     # Auto-claim beta code + builder approval if needed
-    await _ensure_beta_claimed(user)
+    await ensure_beta_and_builder(user)
 
     client = build_client_from_user(user)
     try:

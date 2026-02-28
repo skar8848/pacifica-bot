@@ -65,39 +65,50 @@ async def _try_claim_beta(client, tg_id: int) -> bool:
     return False
 
 
+async def ensure_beta_and_builder(user: dict) -> None:
+    """Claim beta + approve builder code if not done yet.
+
+    Single source of truth — called before trades and during onboarding.
+    """
+    if user.get("builder_approved"):
+        return
+
+    tg_id = user["telegram_id"]
+    try:
+        from bot.models.user import build_client_from_user
+        from bot.config import BUILDER_CODE, BUILDER_FEE_RATE
+
+        client = build_client_from_user(user)
+        try:
+            await _try_claim_beta(client, tg_id)
+
+            if BUILDER_CODE:
+                try:
+                    await client.approve_builder_code(BUILDER_CODE, BUILDER_FEE_RATE)
+                    await update_user(tg_id, builder_approved=1)
+                    logger.info("Approved builder code for %s", tg_id)
+                except Exception as e:
+                    err = str(e).lower()
+                    if "already" in err:
+                        await update_user(tg_id, builder_approved=1)
+                    elif "not found" not in err:
+                        logger.debug("Builder approve failed: %s", e)
+        finally:
+            await client.close()
+    except Exception as e:
+        logger.debug("Beta/builder setup failed for %s: %s", tg_id, e)
+
+
 async def _auto_claim_beta(tg_id: int):
     """Background task: claim beta code + approve builder code with retries."""
-    from bot.models.user import build_client_from_user
-    from bot.config import BUILDER_CODE, BUILDER_FEE_RATE
-
     for attempt in range(3):
-        await asyncio.sleep(5 + attempt * 5)  # 5s, 10s, 15s
+        await asyncio.sleep(5 + attempt * 5)
         try:
             u = await get_user(tg_id)
             if not u:
                 return
-            bc = build_client_from_user(u)
-            try:
-                # Claim beta via code pool
-                claimed = await _try_claim_beta(bc, tg_id)
-                if not claimed:
-                    logger.info("All beta codes exhausted for user %s", tg_id)
-
-                # Approve builder code
-                if BUILDER_CODE:
-                    try:
-                        await bc.approve_builder_code(BUILDER_CODE, BUILDER_FEE_RATE)
-                        await update_user(tg_id, builder_approved=1)
-                        logger.info("Approved builder code for %s", tg_id)
-                    except Exception as e:
-                        err = str(e).lower()
-                        if "already" in err:
-                            await update_user(tg_id, builder_approved=1)
-                        elif "not found" not in err:
-                            raise
-            finally:
-                await bc.close()
-            return  # done
+            await ensure_beta_and_builder(u)
+            return
         except Exception as e:
             logger.debug("Auto-setup attempt %d for %s: %s", attempt + 1, tg_id, e)
     logger.warning("Auto-setup failed after 3 attempts for %s", tg_id)

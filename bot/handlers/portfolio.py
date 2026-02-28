@@ -136,13 +136,10 @@ async def cmd_history(message: Message):
 @router.message(Command("prices"))
 async def cmd_prices(message: Message):
     """Quick price overview for top assets."""
-    from bot.services.pacifica_client import PacificaClient
-    from solders.keypair import Keypair
+    from bot.services.market_data import get_markets_info, get_price
 
-    client = PacificaClient(account="public", keypair=Keypair())
     try:
-        markets = await client.get_markets_info()
-
+        markets = await get_markets_info()
         top_symbols = ["BTC", "ETH", "SOL", "TRUMP", "HYPE", "DOGE", "XRP", "SUI", "LINK", "AVAX"]
         lines = ["<b>📊 Current Prices</b>\n"]
 
@@ -150,20 +147,14 @@ async def cmd_prices(message: Message):
             m = next((x for x in markets if x.get("symbol") == sym), None)
             if not m:
                 continue
-            try:
-                trades = await client.get_trades(sym, limit=1)
-                if trades:
-                    price = trades[0].get("price", "?")
-                    max_lev = m.get("max_leverage", "?")
-                    lines.append(f"  <b>{sym}</b>: ${price}  ({max_lev}x)")
-            except Exception:
-                pass
+            price = await get_price(sym)
+            if price:
+                max_lev = m.get("max_leverage", "?")
+                lines.append(f"  <b>{sym}</b>: ${price:,.2f}  ({max_lev}x)")
 
         text = "\n".join(lines) if len(lines) > 1 else "Could not fetch prices."
     except Exception as e:
         text = f"Error: {e}"
-    finally:
-        await client.close()
 
     await message.answer(text, reply_markup=main_menu_kb())
 
