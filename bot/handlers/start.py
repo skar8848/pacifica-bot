@@ -1267,29 +1267,25 @@ async def cmd_top(message: Message):
     traders.sort(key=lambda t: float(t.get(sort_key, 0)), reverse=True)
 
     text = f"<b>🏆 Top Traders — {sort_label}</b>\n\n"
-    for i, t in enumerate(traders[:15], 1):
+    for i, t in enumerate(traders[:10], 1):
         addr = t.get("address", "?")
-        name = t.get("username") or f"{addr[:6]}...{addr[-4:]}"
         val = float(t.get(sort_key, 0))
         equity = float(t.get("equity_current", 0))
-        oi = float(t.get("oi_current", 0))
 
         sign = "+" if val >= 0 else ""
         emoji = "🟢" if val >= 0 else "🔴"
-
-        if sort_key.startswith("pnl"):
-            val_str = f"{sign}${val:,.0f}"
-        else:
-            val_str = f"${val:,.0f}"
+        val_str = f"{sign}${val:,.0f}" if sort_key.startswith("pnl") else f"${val:,.0f}"
+        short = f"{addr[:6]}...{addr[-4:]}"
 
         text += (
-            f"<b>{i}.</b> {emoji} <code>{addr[:8]}...</code>\n"
-            f"   {sort_label}: {val_str} | Equity: ${equity:,.0f}\n"
+            f"<b>{i}.</b> {emoji} {short}\n"
+            f"   <code>{addr}</code>\n"
+            f"   {sort_label}: {val_str} | Equity: ${equity:,.0f}\n\n"
         )
 
     text += (
-        f"\n<i>Sort: /top pnl | /top pnl7d | /top pnl1d | /top volume | /top equity</i>\n"
-        f"<i>Inspect: /inspect &lt;wallet&gt;</i>"
+        f"<i>Sort: /top pnl | /top pnl7d | /top volume | /top equity</i>\n"
+        f"<i>Tap address to copy, then /inspect &lt;wallet&gt;</i>"
     )
 
     from bot.utils.keyboards import InlineKeyboardMarkup, InlineKeyboardButton
@@ -1325,14 +1321,15 @@ async def cb_top_refresh(callback: CallbackQuery):
     traders.sort(key=lambda t: float(t.get(sort_key, 0)), reverse=True)
 
     text = f"<b>🏆 Top Traders — {sort_label}</b>\n\n"
-    for i, t in enumerate(traders[:15], 1):
+    for i, t in enumerate(traders[:10], 1):
         addr = t.get("address", "?")
         val = float(t.get(sort_key, 0))
         equity = float(t.get("equity_current", 0))
         sign = "+" if val >= 0 else ""
         emoji = "🟢" if val >= 0 else "🔴"
         val_str = f"{sign}${val:,.0f}" if sort_key.startswith("pnl") else f"${val:,.0f}"
-        text += f"<b>{i}.</b> {emoji} <code>{addr[:8]}...</code> | {val_str} | Eq: ${equity:,.0f}\n"
+        short = f"{addr[:6]}...{addr[-4:]}"
+        text += f"<b>{i}.</b> {emoji} {short}\n   <code>{addr}</code>\n   {val_str} | Eq: ${equity:,.0f}\n\n"
 
     from bot.utils.keyboards import InlineKeyboardMarkup, InlineKeyboardButton
     kb = InlineKeyboardMarkup(inline_keyboard=[
