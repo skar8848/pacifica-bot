@@ -864,6 +864,82 @@ async def cb_position_detail(callback: CallbackQuery):
     )
 
 
+@router.callback_query(F.data.startswith("share_pnl:"))
+async def cb_share_pnl(callback: CallbackQuery):
+    """Generate and send PnL share card as image."""
+    symbol = callback.data.split(":")[1]  # type: ignore
+    tg_id = callback.from_user.id
+    user = await get_user(tg_id)
+
+    if not user or not user.get("pacifica_account"):
+        await callback.answer("Not linked")
+        return
+
+    await callback.answer("Generating PnL card...")
+
+    try:
+        client = build_client_from_user(user)
+        positions = await client.get_positions()
+        await client.close()
+    except Exception as e:
+        await callback.answer(f"Error: {e}", show_alert=True)
+        return
+
+    pos = next((p for p in positions if p.get("symbol", "").upper() == symbol.upper()), None)
+    if not pos:
+        await callback.answer("Position not found", show_alert=True)
+        return
+
+    mark_price = await _get_price(symbol) or 0
+    entry_price = float(pos.get("entry_price", 0))
+    amount = abs(float(pos.get("amount", pos.get("size", 0))))
+    side = pos.get("side", "bid")
+    leverage = pos.get("leverage", "?")
+
+    # Calculate PnL
+    if side == "bid":
+        pnl_usd = (mark_price - entry_price) * amount
+    else:
+        pnl_usd = (entry_price - mark_price) * amount
+
+    # Subtract funding
+    try:
+        funding = float(pos.get("funding", 0))
+        pnl_usd -= funding
+    except (ValueError, TypeError):
+        pass
+
+    cost_basis = entry_price * amount
+    pnl_pct = (pnl_usd / cost_basis * 100) if cost_basis else 0
+
+    from bot.services.pnl_card import generate_pnl_card
+    from aiogram.types import BufferedInputFile
+
+    card_bytes = generate_pnl_card(
+        symbol=symbol,
+        side=side,
+        entry_price=entry_price,
+        mark_price=mark_price,
+        amount=amount,
+        leverage=leverage,
+        pnl_usd=pnl_usd,
+        pnl_pct=pnl_pct,
+        username=user.get("username"),
+        ref_code=user.get("username") or user.get("ref_code"),
+    )
+
+    photo = BufferedInputFile(card_bytes, filename=f"pnl_{symbol}.png")
+
+    pnl_sign = "+" if pnl_usd >= 0 else ""
+    caption = (
+        f"{'🟢' if pnl_usd >= 0 else '🔴'} {symbol} {'LONG' if side == 'bid' else 'SHORT'} "
+        f"| {pnl_sign}${pnl_usd:,.2f} ({pnl_sign}{pnl_pct:.1f}%)\n\n"
+        f"Trade on @trident_pacifica_bot"
+    )
+
+    await callback.message.answer_photo(photo=photo, caption=caption)  # type: ignore
+
+
 @router.callback_query(F.data.startswith("pclose:"))
 async def cb_partial_close(callback: CallbackQuery):
     """Partial close: 25%, 50%, 75%."""
@@ -1019,6 +1095,36 @@ async def cb_exec_close(callback: CallbackQuery):
             f"{pnl_line}",
             reply_markup=main_menu_kb(),
         )
+
+        # Auto-generate PnL share card on close
+        if close_price and entry_price:
+            try:
+                from bot.services.pnl_card import generate_pnl_card
+                from aiogram.types import BufferedInputFile
+
+                cost_basis = entry_price * amount_f
+                pnl_pct = (pnl / cost_basis * 100) if cost_basis else 0
+
+                card_bytes = generate_pnl_card(
+                    symbol=symbol, side=pos_side,
+                    entry_price=entry_price, mark_price=close_price,
+                    amount=amount_f, leverage=pos.get("leverage", "?"),
+                    pnl_usd=pnl, pnl_pct=pnl_pct,
+                    username=user.get("username"),
+                    ref_code=user.get("username") or user.get("ref_code"),
+                )
+                photo = BufferedInputFile(card_bytes, filename=f"pnl_{symbol}.png")
+                pnl_sign = "+" if pnl >= 0 else ""
+                await callback.message.answer_photo(  # type: ignore
+                    photo=photo,
+                    caption=(
+                        f"{'🟢' if pnl >= 0 else '🔴'} {symbol} {direction} closed "
+                        f"| {pnl_sign}${pnl:,.2f} ({pnl_sign}{pnl_pct:.1f}%)\n\n"
+                        f"Trade on @trident_pacifica_bot"
+                    ),
+                )
+            except Exception as e:
+                logger.debug("PnL card generation failed: %s", e)
     except PacificaAPIError as e:
         await callback.message.edit_text(  # type: ignore
             f"<b>❌ Close Failed</b>\n\n{e}", reply_markup=back_to_menu_kb(),

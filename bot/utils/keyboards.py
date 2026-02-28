@@ -254,6 +254,7 @@ def position_detail_kb(symbol: str, side: str) -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton(text="❌ Close 100%", callback_data=f"close_pos:{symbol}"),
+                InlineKeyboardButton(text="📸 Share PnL", callback_data=f"share_pnl:{symbol}"),
             ],
             [
                 InlineKeyboardButton(text="◀️ Positions", callback_data="nav:positions"),

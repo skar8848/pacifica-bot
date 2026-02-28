@@ -338,11 +338,15 @@ async def onboard_generate(callback: CallbackQuery, state: FSMContext):
     await _finish_wallet_setup(tg_id, pub, enc, state)
 
     from bot.utils.keyboards import wallet_kb
+    if PACIFICA_NETWORK == "mainnet":
+        next_step = "<b>Next:</b> Send SOL to your wallet address above, then deposit USDC on Pacifica to start trading."
+    else:
+        next_step = "<b>Next:</b> SOL + USDC are being sent to your wallet automatically. You'll be ready to trade in a few seconds."
     await callback.message.edit_text(  # type: ignore
         f"<b>Wallet Generated!</b>\n\n"
         f"Address:\n<code>{pub}</code>\n\n"
         f"Your private key is stored encrypted.\n\n"
-        f"<b>Next:</b> Get SOL + USDC from the wallet page below.",
+        f"{next_step}",
         reply_markup=wallet_kb(0, 0),
     )
 
