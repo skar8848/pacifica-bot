@@ -99,14 +99,17 @@ class TradeStates(StatesGroup):
     waiting_auto_sl = State()
 
 
+_price_client: "PacificaClient | None" = None
+
 async def _get_price(symbol: str) -> float | None:
-    """Fetch latest trade price for a symbol."""
+    """Fetch latest trade price for a symbol (reuses a shared client)."""
+    global _price_client
     try:
-        from solders.keypair import Keypair
         from bot.services.pacifica_client import PacificaClient
-        client = PacificaClient(account="public", keypair=Keypair())
-        trades = await client.get_trades(symbol, limit=1)
-        await client.close()
+        if _price_client is None or (_price_client._session and _price_client._session.closed):
+            from solders.keypair import Keypair
+            _price_client = PacificaClient(account="public", keypair=Keypair())
+        trades = await _price_client.get_trades(symbol, limit=1)
         if trades:
             return float(trades[0]["price"])
     except Exception:
@@ -245,6 +248,34 @@ async def cb_orderbook(callback: CallbackQuery):
 
     await callback.message.edit_text(  # type: ignore
         text, reply_markup=market_detail_kb(symbol),
+    )
+
+
+# ------------------------------------------------------------------
+# Chart — candlestick image from Pacifica kline data
+# ------------------------------------------------------------------
+
+@router.callback_query(F.data.startswith("chart:"))
+async def cb_chart(callback: CallbackQuery):
+    symbol = callback.data.split(":")[1]  # type: ignore
+    await callback.answer("Generating chart...")
+
+    from bot.services.chart import generate_chart
+    from aiogram.types import BufferedInputFile
+
+    chart_bytes = await generate_chart(symbol, interval="1h", num_candles=48)
+    if not chart_bytes:
+        await callback.message.answer(  # type: ignore
+            f"Chart unavailable for {symbol}.",
+            reply_markup=market_detail_kb(symbol),
+        )
+        return
+
+    photo = BufferedInputFile(chart_bytes, filename=f"chart_{symbol}.png")
+    await callback.message.answer_photo(  # type: ignore
+        photo=photo,
+        caption=f"📈 <b>{symbol}</b> — 1H candles",
+        reply_markup=market_detail_kb(symbol),
     )
 
 
@@ -877,13 +908,14 @@ async def cb_share_pnl(callback: CallbackQuery):
 
     await callback.answer("Generating PnL card...")
 
+    client = build_client_from_user(user)
     try:
-        client = build_client_from_user(user)
         positions = await client.get_positions()
-        await client.close()
     except Exception as e:
         await callback.answer(f"Error: {e}", show_alert=True)
         return
+    finally:
+        await client.close()
 
     pos = next((p for p in positions if p.get("symbol", "").upper() == symbol.upper()), None)
     if not pos:
@@ -937,7 +969,7 @@ async def cb_share_pnl(callback: CallbackQuery):
         f"Trade on @trident_pacifica_bot"
     )
 
-    await callback.message.answer_photo(photo=photo, caption=caption)  # type: ignore
+    await callback.message.answer_photo(photo=photo, caption=caption, reply_markup=main_menu_kb())  # type: ignore
 
 
 @router.callback_query(F.data.startswith("pclose:"))
@@ -954,8 +986,8 @@ async def cb_partial_close(callback: CallbackQuery):
 
     await callback.answer(f"Closing {pct}%...")
 
+    client = build_client_from_user(user)
     try:
-        client = build_client_from_user(user)
         positions = await client.get_positions()
         pos = next((p for p in positions if p.get("symbol", "").upper() == symbol.upper()), None)
 
@@ -963,7 +995,6 @@ async def cb_partial_close(callback: CallbackQuery):
             await callback.message.edit_text(  # type: ignore
                 f"No position for {symbol}.", reply_markup=back_to_menu_kb(),
             )
-            await client.close()
             return
 
         close_side = "ask" if pos.get("side") == "bid" else "bid"
@@ -988,7 +1019,6 @@ async def cb_partial_close(callback: CallbackQuery):
             symbol=symbol, side=close_side, amount=partial_str,
             reduce_only=True, slippage=slippage,
         )
-        await client.close()
 
         # PnL on closed portion
         pnl_line = ""
@@ -1016,6 +1046,8 @@ async def cb_partial_close(callback: CallbackQuery):
         await callback.message.edit_text(  # type: ignore
             f"<b>❌ Partial Close Failed</b>\n\n{e}", reply_markup=back_to_menu_kb(),
         )
+    finally:
+        await client.close()
 
 
 @router.callback_query(F.data.startswith("close_pos:"))
@@ -1043,8 +1075,8 @@ async def cb_exec_close(callback: CallbackQuery):
     # Auto-claim beta code + builder approval if needed
     await _ensure_beta_claimed(user)
 
+    client = build_client_from_user(user)
     try:
-        client = build_client_from_user(user)
         positions = await client.get_positions()
         pos = next((p for p in positions if p.get("symbol", "").upper() == symbol.upper()), None)
 
@@ -1052,14 +1084,21 @@ async def cb_exec_close(callback: CallbackQuery):
             await callback.message.edit_text(  # type: ignore
                 f"No position for {symbol}.", reply_markup=back_to_menu_kb(),
             )
-            await client.close()
             return
 
         close_side = "ask" if pos.get("side") == "bid" else "bid"
         amount_f = abs(float(pos.get("amount", pos.get("size", 0))))
-        amount = str(amount_f)
         entry_price = float(pos.get("entry_price", 0))
         pos_side = pos.get("side", "bid")
+
+        # Round amount to lot size (same as partial close) to avoid
+        # float precision issues like "0.45865000000000003"
+        import math
+        lot_size = await _get_lot_size(symbol)
+        lot = float(lot_size)
+        rounded_amount = math.floor(amount_f / lot) * lot
+        decimals = len(lot_size.split(".")[-1]) if "." in lot_size else 0
+        amount = f"{rounded_amount:.{decimals}f}" if decimals else str(int(rounded_amount))
 
         # Get current price for PnL calculation
         close_price = await _get_price(symbol) or 0
@@ -1071,7 +1110,6 @@ async def cb_exec_close(callback: CallbackQuery):
             symbol=symbol, side=close_side, amount=amount,
             reduce_only=True, slippage=slippage,
         )
-        await client.close()
 
         # Calculate closed PnL
         pnl_line = ""
@@ -1122,6 +1160,7 @@ async def cb_exec_close(callback: CallbackQuery):
                         f"| {pnl_sign}${pnl:,.2f} ({pnl_sign}{pnl_pct:.1f}%)\n\n"
                         f"Trade on @trident_pacifica_bot"
                     ),
+                    reply_markup=main_menu_kb(),
                 )
             except Exception as e:
                 logger.debug("PnL card generation failed: %s", e)
@@ -1129,6 +1168,8 @@ async def cb_exec_close(callback: CallbackQuery):
         await callback.message.edit_text(  # type: ignore
             f"<b>❌ Close Failed</b>\n\n{e}", reply_markup=back_to_menu_kb(),
         )
+    finally:
+        await client.close()
 
 
 @router.callback_query(F.data == "exec_closeall")
@@ -1145,8 +1186,8 @@ async def cb_exec_closeall(callback: CallbackQuery):
     # Auto-claim beta code + builder approval if needed
     await _ensure_beta_claimed(user)
 
+    client = build_client_from_user(user)
     try:
-        client = build_client_from_user(user)
         positions = await client.get_positions()
 
         settings = await get_user_settings(tg_id)
@@ -1156,7 +1197,14 @@ async def cb_exec_closeall(callback: CallbackQuery):
         for pos in positions:
             symbol = pos.get("symbol", "?")
             close_side = "ask" if pos.get("side") == "bid" else "bid"
-            amount = str(abs(float(pos.get("amount", pos.get("size", 0)))))
+            # Round amount to lot size to avoid float precision issues
+            import math
+            raw_amount = abs(float(pos.get("amount", pos.get("size", 0))))
+            lot_size = await _get_lot_size(symbol)
+            lot = float(lot_size)
+            rounded = math.floor(raw_amount / lot) * lot
+            dec = len(lot_size.split(".")[-1]) if "." in lot_size else 0
+            amount = f"{rounded:.{dec}f}" if dec else str(int(rounded))
             try:
                 await client.create_market_order(
                     symbol=symbol, side=close_side, amount=amount,
@@ -1167,7 +1215,6 @@ async def cb_exec_closeall(callback: CallbackQuery):
             except PacificaAPIError as e:
                 results.append(f"❌ {symbol}: {e}")
 
-        await client.close()
         await callback.message.edit_text(  # type: ignore
             "<b>Close All Results</b>\n\n" + "\n".join(results),
             reply_markup=main_menu_kb(),
@@ -1176,6 +1223,8 @@ async def cb_exec_closeall(callback: CallbackQuery):
         await callback.message.edit_text(  # type: ignore
             f"Error: {e}", reply_markup=back_to_menu_kb(),
         )
+    finally:
+        await client.close()
 
 
 # ------------------------------------------------------------------

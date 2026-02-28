@@ -300,16 +300,17 @@ async def get_user_by_ref_code(code: str) -> dict | None:
 
 
 async def is_username_taken(username: str, exclude_tg_id: int | None = None) -> bool:
-    """Check if a username is already taken by another user."""
+    """Check if a username is already taken by another user (case-insensitive)."""
     db = await get_db()
+    lower = username.lower()
     if exclude_tg_id:
         async with db.execute(
-            "SELECT 1 FROM users WHERE username = ? AND telegram_id != ?",
-            (username, exclude_tg_id),
+            "SELECT 1 FROM users WHERE LOWER(username) = ? AND telegram_id != ?",
+            (lower, exclude_tg_id),
         ) as cursor:
             return (await cursor.fetchone()) is not None
     async with db.execute(
-        "SELECT 1 FROM users WHERE username = ?", (username,)
+        "SELECT 1 FROM users WHERE LOWER(username) = ?", (lower,)
     ) as cursor:
         return (await cursor.fetchone()) is not None
 

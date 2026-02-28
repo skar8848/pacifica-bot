@@ -49,8 +49,8 @@ ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "6994676998").split(",") if 
 
 # --- SOL Dispenser (devnet) ---
 DISPENSER_PRIVATE_KEY = os.getenv("DISPENSER_PRIVATE_KEY", "")
-DISPENSER_SOL_AMOUNT = 0.1  # SOL sent to each new wallet
-DISPENSER_USDC_AMOUNT = 10_000  # USDC sent to each new wallet (devnet)
+DISPENSER_SOL_AMOUNT = 0.02  # SOL sent to each new wallet
+DISPENSER_USDC_AMOUNT = 3_000  # USDC sent to each new wallet (devnet)
 
 # --- Defaults ---
 DEFAULT_SLIPPAGE = "0.5"

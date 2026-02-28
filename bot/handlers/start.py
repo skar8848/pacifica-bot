@@ -341,7 +341,11 @@ async def onboard_generate(callback: CallbackQuery, state: FSMContext):
     if PACIFICA_NETWORK == "mainnet":
         next_step = "<b>Next:</b> Send SOL to your wallet address above, then deposit USDC on Pacifica to start trading."
     else:
-        next_step = "<b>Next:</b> SOL + USDC are being sent to your wallet automatically. You'll be ready to trade in a few seconds."
+        next_step = (
+            "⏳ <b>Please wait ~10 seconds</b> — your wallet is being set up.\n"
+            "SOL + USDC are being sent automatically.\n\n"
+            "Once ready, open your <b>Wallet</b> to check balances and start trading."
+        )
     await callback.message.edit_text(  # type: ignore
         f"<b>Wallet Generated!</b>\n\n"
         f"Address:\n<code>{pub}</code>\n\n"
@@ -434,16 +438,40 @@ async def nav_markets_all(callback: CallbackQuery):
 @router.callback_query(F.data == "nav:leaderboard")
 async def nav_leaderboard(callback: CallbackQuery):
     await callback.answer("Loading leaderboard...")
+
+    text = ""
     try:
         client = await _pub()
         traders = await client.get_leaderboard()
-    except Exception as e:
-        await callback.message.edit_text(  # type: ignore
-            f"Error: {e}", reply_markup=back_to_menu_kb(),
-        )
-        return
+        text = fmt_leaderboard(traders)
+    except Exception:
+        pass
 
-    text = fmt_leaderboard(traders)
+    if not text or text == "No leaderboard data.":
+        # Pacifica API may not have a leaderboard endpoint — show our own
+        from database.db import get_db
+        db = await get_db()
+        async with db.execute(
+            """SELECT u.username, u.pacifica_account, COUNT(t.id) as trades,
+                      SUM(CASE WHEN t.order_type IN ('market_close','partial_close') THEN 1 ELSE 0 END) as closes
+               FROM users u LEFT JOIN trade_log t ON u.telegram_id = t.telegram_id
+               WHERE u.pacifica_account IS NOT NULL
+               GROUP BY u.telegram_id ORDER BY trades DESC LIMIT 10"""
+        ) as cursor:
+            rows = await cursor.fetchall()
+
+        if rows:
+            text = "<b>🏆 Trident Leaderboard</b>\n\n"
+            for i, row in enumerate(rows, 1):
+                name = row[0] or f"{row[1][:6]}...{row[1][-4:]}"
+                text += f"<b>{i}.</b> @{name} — {row[2]} trades\n"
+        else:
+            text = (
+                "<b>🏆 Leaderboard</b>\n\n"
+                "No traders yet. Be the first!\n\n"
+                "Start trading to climb the ranks."
+            )
+
     if len(text) > 4000:
         text = text[:4000] + "\n..."
 
@@ -1205,19 +1233,311 @@ async def copy_log(callback: CallbackQuery):
 
 
 # ------------------------------------------------------------------
+# /top — top traders leaderboard with sorting
+# ------------------------------------------------------------------
+
+@router.message(Command("top"))
+async def cmd_top(message: Message):
+    """Show top Pacifica traders from the leaderboard."""
+    args = (message.text or "").split()
+    sort_by = args[1].lower() if len(args) > 1 else "pnl"
+
+    await message.answer("Loading top traders...")
+
+    try:
+        client = await _pub()
+        traders = await client.get_leaderboard(limit=100)
+    except Exception as e:
+        await message.answer(f"Error: {e}", reply_markup=back_to_menu_kb())
+        return
+
+    if not traders:
+        await message.answer("No leaderboard data available.", reply_markup=main_menu_kb())
+        return
+
+    # Sort based on user preference
+    sort_map = {
+        "pnl": ("pnl_all_time", "All-Time PnL"),
+        "pnl7d": ("pnl_7d", "7-Day PnL"),
+        "pnl1d": ("pnl_1d", "1-Day PnL"),
+        "volume": ("volume_all_time", "All-Time Volume"),
+        "equity": ("equity_current", "Equity"),
+    }
+    sort_key, sort_label = sort_map.get(sort_by, sort_map["pnl"])
+    traders.sort(key=lambda t: float(t.get(sort_key, 0)), reverse=True)
+
+    text = f"<b>🏆 Top Traders — {sort_label}</b>\n\n"
+    for i, t in enumerate(traders[:15], 1):
+        addr = t.get("address", "?")
+        name = t.get("username") or f"{addr[:6]}...{addr[-4:]}"
+        val = float(t.get(sort_key, 0))
+        equity = float(t.get("equity_current", 0))
+        oi = float(t.get("oi_current", 0))
+
+        sign = "+" if val >= 0 else ""
+        emoji = "🟢" if val >= 0 else "🔴"
+
+        if sort_key.startswith("pnl"):
+            val_str = f"{sign}${val:,.0f}"
+        else:
+            val_str = f"${val:,.0f}"
+
+        text += (
+            f"<b>{i}.</b> {emoji} <code>{addr[:8]}...</code>\n"
+            f"   {sort_label}: {val_str} | Equity: ${equity:,.0f}\n"
+        )
+
+    text += (
+        f"\n<i>Sort: /top pnl | /top pnl7d | /top pnl1d | /top volume | /top equity</i>\n"
+        f"<i>Inspect: /inspect &lt;wallet&gt;</i>"
+    )
+
+    from bot.utils.keyboards import InlineKeyboardMarkup, InlineKeyboardButton
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="🔄 Refresh", callback_data=f"top:{sort_by}"),
+            InlineKeyboardButton(text="◀️ Menu", callback_data="nav:menu"),
+        ],
+    ])
+    await message.answer(text, reply_markup=kb)
+
+
+@router.callback_query(F.data.startswith("top:"))
+async def cb_top_refresh(callback: CallbackQuery):
+    sort_by = callback.data.split(":")[1]  # type: ignore
+    await callback.answer("Refreshing...")
+
+    try:
+        client = await _pub()
+        traders = await client.get_leaderboard(limit=100)
+    except Exception as e:
+        await callback.message.edit_text(f"Error: {e}", reply_markup=back_to_menu_kb())  # type: ignore
+        return
+
+    sort_map = {
+        "pnl": ("pnl_all_time", "All-Time PnL"),
+        "pnl7d": ("pnl_7d", "7-Day PnL"),
+        "pnl1d": ("pnl_1d", "1-Day PnL"),
+        "volume": ("volume_all_time", "All-Time Volume"),
+        "equity": ("equity_current", "Equity"),
+    }
+    sort_key, sort_label = sort_map.get(sort_by, sort_map["pnl"])
+    traders.sort(key=lambda t: float(t.get(sort_key, 0)), reverse=True)
+
+    text = f"<b>🏆 Top Traders — {sort_label}</b>\n\n"
+    for i, t in enumerate(traders[:15], 1):
+        addr = t.get("address", "?")
+        val = float(t.get(sort_key, 0))
+        equity = float(t.get("equity_current", 0))
+        sign = "+" if val >= 0 else ""
+        emoji = "🟢" if val >= 0 else "🔴"
+        val_str = f"{sign}${val:,.0f}" if sort_key.startswith("pnl") else f"${val:,.0f}"
+        text += f"<b>{i}.</b> {emoji} <code>{addr[:8]}...</code> | {val_str} | Eq: ${equity:,.0f}\n"
+
+    from bot.utils.keyboards import InlineKeyboardMarkup, InlineKeyboardButton
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="🔄 Refresh", callback_data=f"top:{sort_by}"),
+            InlineKeyboardButton(text="◀️ Menu", callback_data="nav:menu"),
+        ],
+    ])
+    await callback.message.edit_text(text, reply_markup=kb)  # type: ignore
+
+
+# ------------------------------------------------------------------
+# /inspect <wallet> — inspect any trader's positions & stats
+# ------------------------------------------------------------------
+
+@router.message(Command("inspect"))
+async def cmd_inspect(message: Message):
+    """Inspect a trader's positions and stats."""
+    args = (message.text or "").split()
+    if len(args) < 2:
+        await message.answer(
+            "<b>Usage:</b> <code>/inspect &lt;wallet_address&gt;</code>\n\n"
+            "Find wallets with /top or the leaderboard.",
+            reply_markup=main_menu_kb(),
+        )
+        return
+
+    wallet = args[1].strip()
+    await message.answer(f"Inspecting <code>{wallet[:8]}...</code>...")
+
+    try:
+        client = await _pub()
+
+        # Fetch account, positions, and recent trades in parallel
+        import asyncio
+        acc_task = asyncio.create_task(client.get_account_info(account=wallet))
+        pos_task = asyncio.create_task(client.get_positions(account=wallet))
+        trades_task = asyncio.create_task(client.get_trades_history(account=wallet, limit=10))
+
+        account = await acc_task
+        positions = await pos_task
+        trades = await trades_task
+    except Exception as e:
+        await message.answer(f"Error: {e}", reply_markup=back_to_menu_kb())
+        return
+
+    # Account summary
+    equity = float(account.get("equity", 0))
+    balance = float(account.get("balance", 0))
+    margin_used = float(account.get("margin_used", 0))
+    unrealized_pnl = float(account.get("unrealized_pnl", 0))
+    upnl_sign = "+" if unrealized_pnl >= 0 else ""
+
+    text = (
+        f"<b>🔍 Trader: <code>{wallet[:8]}...{wallet[-4:]}</code></b>\n\n"
+        f"💰 Equity: <b>${equity:,.2f}</b>\n"
+        f"💵 Balance: ${balance:,.2f}\n"
+        f"📊 Margin used: ${margin_used:,.2f}\n"
+        f"📈 Unrealized PnL: {upnl_sign}${unrealized_pnl:,.2f}\n\n"
+    )
+
+    # Open positions
+    if positions:
+        text += f"<b>📋 Open Positions ({len(positions)})</b>\n"
+        for p in positions[:8]:
+            sym = p.get("symbol", "?")
+            side = "LONG" if p.get("side") == "bid" else "SHORT"
+            side_emoji = "🟢" if p.get("side") == "bid" else "🔴"
+            amt = abs(float(p.get("amount", 0)))
+            entry = float(p.get("entry_price", 0))
+            lev = p.get("leverage", "?")
+            notional = amt * entry
+
+            text += (
+                f"  {side_emoji} {sym} {side} {lev}x\n"
+                f"    Size: {amt} (${notional:,.0f}) | Entry: ${entry:,.2f}\n"
+            )
+        if len(positions) > 8:
+            text += f"  <i>... +{len(positions) - 8} more</i>\n"
+    else:
+        text += "<i>No open positions</i>\n"
+
+    # Recent trades
+    if trades:
+        text += f"\n<b>📜 Recent Trades</b>\n"
+        for t in trades[:5]:
+            sym = t.get("symbol", "?")
+            side = t.get("side", "?")
+            price = float(t.get("price", 0))
+            pnl = float(t.get("pnl", 0))
+            if pnl:
+                pnl_str = f" | PnL: {'+'if pnl >= 0 else ''}{pnl:,.2f}"
+            else:
+                pnl_str = ""
+            text += f"  {sym} {side} @${price:,.2f}{pnl_str}\n"
+
+    if len(text) > 4000:
+        text = text[:4000] + "\n..."
+
+    from bot.utils.keyboards import InlineKeyboardMarkup, InlineKeyboardButton
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="👥 Copy This Trader", callback_data=f"copy:start:{wallet}"),
+            InlineKeyboardButton(text="🔄 Refresh", callback_data=f"inspect:{wallet}"),
+        ],
+        [InlineKeyboardButton(text="◀️ Menu", callback_data="nav:menu")],
+    ])
+    await message.answer(text, reply_markup=kb)
+
+
+@router.callback_query(F.data.startswith("copy:start:"))
+async def cb_copy_start_direct(callback: CallbackQuery):
+    """Direct copy from inspect view — skip FSM, go straight to settings."""
+    wallet = callback.data.split(":", 2)[2]  # type: ignore
+    tg_id = callback.from_user.id
+    await callback.answer()
+
+    # Store in copy_trade module's temp setup
+    from bot.handlers.copy_trade import _copy_setup
+    _copy_setup[tg_id] = {"wallet": wallet, "multiplier": 1.0, "max_usd": 1000.0}
+
+    from bot.utils.keyboards import copy_settings_kb
+    await callback.message.edit_text(  # type: ignore
+        f"<b>Copy Trading Setup</b>\n\n"
+        f"Master: <code>{wallet}</code>\n"
+        f"Size multiplier: 1.0x\n"
+        f"Max position: $1000\n\n"
+        f"Adjust settings or start:",
+        reply_markup=copy_settings_kb(wallet),
+    )
+
+
+@router.callback_query(F.data.startswith("inspect:"))
+async def cb_inspect(callback: CallbackQuery):
+    wallet = callback.data.split(":", 1)[1]  # type: ignore
+    await callback.answer("Refreshing...")
+
+    try:
+        client = await _pub()
+        account = await client.get_account_info(account=wallet)
+        positions = await client.get_positions(account=wallet)
+    except Exception as e:
+        await callback.message.edit_text(f"Error: {e}", reply_markup=back_to_menu_kb())  # type: ignore
+        return
+
+    equity = float(account.get("equity", 0))
+    unrealized_pnl = float(account.get("unrealized_pnl", 0))
+
+    text = (
+        f"<b>🔍 <code>{wallet[:8]}...{wallet[-4:]}</code></b>\n\n"
+        f"💰 Equity: ${equity:,.2f} | uPnL: {'+'if unrealized_pnl >= 0 else ''}{unrealized_pnl:,.2f}\n\n"
+    )
+
+    if positions:
+        for p in positions[:8]:
+            sym = p.get("symbol", "?")
+            side_emoji = "🟢" if p.get("side") == "bid" else "🔴"
+            side = "L" if p.get("side") == "bid" else "S"
+            amt = abs(float(p.get("amount", 0)))
+            entry = float(p.get("entry_price", 0))
+            lev = p.get("leverage", "?")
+            text += f"  {side_emoji} {sym} {side} {lev}x | {amt} @${entry:,.2f}\n"
+    else:
+        text += "<i>No positions</i>"
+
+    from bot.utils.keyboards import InlineKeyboardMarkup, InlineKeyboardButton
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="👥 Copy", callback_data=f"copy:start:{wallet}"),
+            InlineKeyboardButton(text="🔄", callback_data=f"inspect:{wallet}"),
+            InlineKeyboardButton(text="◀️ Menu", callback_data="nav:menu"),
+        ],
+    ])
+    await callback.message.edit_text(text, reply_markup=kb)  # type: ignore
+
+
+# ------------------------------------------------------------------
 # /clear — reset user data (dev/testing)
 # ------------------------------------------------------------------
 
 @router.message(Command("clear"))
 async def cmd_clear(message: Message, state: FSMContext):
     tg_id = message.from_user.id  # type: ignore
+    chat_id = message.chat.id
     await state.clear()
 
     from database.db import delete_user
     await delete_user(tg_id)
 
+    # Delete recent messages in the chat (bot + user messages in private chat)
+    import asyncio
+    current_msg_id = message.message_id
+    deleted = 0
+    for msg_id in range(current_msg_id, max(current_msg_id - 200, 0), -1):
+        try:
+            await message.bot.delete_message(chat_id, msg_id)
+            deleted += 1
+        except Exception:
+            pass  # Message already deleted or too old
+        # Small delay to avoid rate limiting
+        if deleted % 30 == 0 and deleted > 0:
+            await asyncio.sleep(0.5)
+
     await message.answer(
-        f"<b>Data cleared.</b>\n\nTap /start to set up again.",
+        f"<b>Chat cleared.</b>\n\nTap /start to set up again.",
     )
 
 

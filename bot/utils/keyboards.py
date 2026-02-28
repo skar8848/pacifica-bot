@@ -104,6 +104,11 @@ def markets_all_kb(markets: list) -> InlineKeyboardMarkup:
 
 
 def market_detail_kb(symbol: str) -> InlineKeyboardMarkup:
+    # Build Pacifica chart URL
+    from bot.config import PACIFICA_NETWORK
+    base = "https://app.pacifica.fi" if PACIFICA_NETWORK == "mainnet" else "https://test-app.pacifica.fi"
+    chart_url = f"{base}/trade/{symbol}"
+
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
@@ -116,6 +121,12 @@ def market_detail_kb(symbol: str) -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton(text="📊 Orderbook", callback_data=f"ob:{symbol}"),
+                InlineKeyboardButton(text="📈 Chart", callback_data=f"chart:{symbol}"),
+            ],
+            [
+                InlineKeyboardButton(text="🌐 Pacifica", url=chart_url),
+            ],
+            [
                 InlineKeyboardButton(text="👥 Copy Top Trader", callback_data="nav:copy"),
             ],
             [

@@ -58,6 +58,7 @@ class PacificaClient:
             await self._session.close()
             self._session = None
 
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
@@ -324,8 +325,43 @@ class PacificaClient:
             {"account": account or self.account},
         )
 
-    async def get_leaderboard(self) -> list:
-        return await self._get("/leaderboard")
+    async def get_leaderboard(self, limit: int = 100) -> list:
+        """GET /leaderboard?limit=... — limit must be 10, 100, or 25000."""
+        return await self._get("/leaderboard", {"limit": limit})
+
+    async def get_kline(
+        self,
+        symbol: str,
+        interval: str = "1h",
+        start_time: int | None = None,
+        end_time: int | None = None,
+    ) -> list:
+        """GET /kline — OHLCV candle data.
+
+        interval: 1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 8h, 12h, 1d
+        start_time / end_time: milliseconds epoch
+        """
+        import time as _time
+        if end_time is None:
+            end_time = int(_time.time() * 1000)
+        if start_time is None:
+            # Default: last 48 candles
+            intervals_ms = {
+                "1m": 60_000, "3m": 180_000, "5m": 300_000, "15m": 900_000,
+                "30m": 1_800_000, "1h": 3_600_000, "2h": 7_200_000,
+                "4h": 14_400_000, "8h": 28_800_000, "12h": 43_200_000, "1d": 86_400_000,
+            }
+            ms = intervals_ms.get(interval, 3_600_000)
+            start_time = end_time - ms * 48
+        params = {
+            "symbol": symbol, "interval": interval,
+            "start_time": start_time, "end_time": end_time,
+        }
+        return await self._get("/kline", params)
+
+    async def get_prices(self) -> list:
+        """GET /info/prices — all current market prices."""
+        return await self._get("/info/prices")
 
 
 class PacificaAPIError(Exception):
