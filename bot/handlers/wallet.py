@@ -36,23 +36,32 @@ logger = logging.getLogger(__name__)
 router = Router()
 
 
+# Cache of dead codes so we don't retry them every time
+_dead_codes: set[str] = set()
+
+
 async def _try_claim_beta(client, tg_id: int) -> bool:
     """Try claiming beta access using the code pool. Returns True if claimed."""
     from bot.config import BETA_CODE_POOL
 
     for code in BETA_CODE_POOL:
+        if code in _dead_codes:
+            continue
         try:
             await client.claim_referral_code(code)
-            logger.info("Claimed beta code %s for user %s", code, tg_id)
+            logger.info("Claimed beta code '%s' for user %s", code, tg_id)
             return True
         except Exception as e:
             err = str(e).lower()
             if "already" in err:
                 return True  # User already has beta
-            if "limit" in err or "invalid" in err:
-                continue  # Code exhausted or invalid, try next
-            logger.debug("Beta code %s failed for %s: %s", code, tg_id, e)
+            if "limit" in err or "invalid" in err or "not found" in err:
+                _dead_codes.add(code)
+                logger.info("Beta code '%s' is dead (skipping from now on)", code)
+                continue
+            logger.debug("Beta code '%s' failed for %s: %s", code, tg_id, e)
             continue
+    logger.warning("All %d beta codes exhausted for user %s", len(BETA_CODE_POOL), tg_id)
     return False
 
 
