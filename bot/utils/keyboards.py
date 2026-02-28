@@ -31,6 +31,7 @@ def main_menu_kb() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="🔔 Alerts", callback_data="nav:alerts"),
             ],
             [
+                InlineKeyboardButton(text="🎟️ Referral", callback_data="set:referral"),
                 InlineKeyboardButton(text="⚙️ Settings", callback_data="nav:settings"),
             ],
         ]
@@ -478,23 +479,15 @@ def alerts_kb(alerts: list) -> InlineKeyboardMarkup:
 def settings_kb(settings: dict | None = None) -> InlineKeyboardMarkup:
     s = settings or {}
     slip = s.get("slippage", "0.5")
-    lev = s.get("default_leverage", "10")
 
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="💳 My Wallet", callback_data="set:wallet"),
+                InlineKeyboardButton(text=f"Slippage: {slip}%", callback_data="set:slippage_menu"),
                 InlineKeyboardButton(text="🔄 Switch Wallet", callback_data="set:import"),
             ],
             [
-                InlineKeyboardButton(text=f"Slippage: {slip}%", callback_data="set:slippage_menu"),
-                InlineKeyboardButton(text=f"Leverage: {lev}x", callback_data="set:leverage_menu"),
-            ],
-            [
                 InlineKeyboardButton(text="🔑 Activate Beta", callback_data="wallet:claim_beta"),
-                InlineKeyboardButton(text="🔗 Referral", callback_data="set:referral"),
-            ],
-            [
                 InlineKeyboardButton(text="📊 Network Info", callback_data="set:network"),
             ],
             [

@@ -16,7 +16,7 @@ from database.db import (
     get_or_create_ref_code, get_user_by_ref_code, count_referrals,
     get_user_settings, set_user_setting,
     get_active_alerts, add_price_alert, delete_alert,
-    get_referral_stats, claim_referral_fees,
+    get_referral_stats, claim_referral_fees, is_username_taken,
     REFERRAL_FEE_SHARE, REFEREE_FEE_REBATE,
 )
 from bot.services.wallet_manager import generate_wallet, import_wallet
@@ -62,6 +62,10 @@ class AlertStates(StatesGroup):
     waiting_price = State()
 
 
+class ReferralStates(StatesGroup):
+    waiting_username = State()
+
+
 async def _pub() -> PacificaClient:
     """Get a shared client for read-only public endpoints."""
     global _pub_client
@@ -92,6 +96,7 @@ async def cmd_start(message: Message, state: FSMContext):
 
     if user and user.get("pacifica_account"):
         wallet = user["pacifica_account"]
+        display_name = user.get("username") or message.from_user.first_name or "trader"
         # Quick account summary
         summary = ""
         try:
@@ -115,10 +120,17 @@ async def cmd_start(message: Message, state: FSMContext):
         except Exception:
             pass
 
+        # Show referrer if applicable
+        referred_line = ""
+        if user.get("referred_by"):
+            referrer = await get_user(user["referred_by"])
+            if referrer and referrer.get("username"):
+                referred_line = f"\nReferred by: <b>{referrer['username']}</b>\n"
+
         await message.answer(
-            f"<b>{BOT_NAME}</b> — Pacifica Perps\n\n"
+            f"Hey <b>{display_name}</b>, what do you want to trade?\n\n"
             f"Wallet: <code>{wallet[:8]}...{wallet[-4:]}</code>"
-            f"{summary}",
+            f"{summary}{referred_line}",
             reply_markup=main_menu_kb(),
         )
         return
@@ -838,20 +850,27 @@ async def set_referral(callback: CallbackQuery):
     user = await get_user(tg_id)
 
     if not user or not user.get("pacifica_account"):
-        await callback.message.answer(  # type: ignore
+        await callback.message.edit_text(  # type: ignore
             "Set up your wallet first — /start",
+            reply_markup=back_to_menu_kb(),
         )
         return
 
     ref_code = await get_or_create_ref_code(tg_id)
     ref_link = f"https://t.me/{BOT_USERNAME}?start=ref_{ref_code}"
     stats = await get_referral_stats(tg_id)
+    current_name = user.get("username") or ""
 
     ref_pct = int(REFERRAL_FEE_SHARE * 100)
     rebate_pct = int(REFEREE_FEE_REBATE * 100)
 
     from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
     rows = []
+
+    # Username button
+    name_label = f"✏️ @{current_name}" if current_name else "✏️ Set Username"
+    rows.append([InlineKeyboardButton(text=name_label, callback_data="ref:set_name")])
+
     if stats["unclaimed"] > 0.001:
         rows.append([InlineKeyboardButton(
             text=f"💰 Claim ${stats['unclaimed']:,.2f}",
@@ -859,12 +878,15 @@ async def set_referral(callback: CallbackQuery):
         )])
     rows.append([
         InlineKeyboardButton(text="🔄 Refresh", callback_data="set:referral"),
-        InlineKeyboardButton(text="◀️ Settings", callback_data="nav:settings"),
+        InlineKeyboardButton(text="◀️ Menu", callback_data="nav:menu"),
     ])
     kb = InlineKeyboardMarkup(inline_keyboard=rows)
 
+    name_line = f"Username: <b>@{current_name}</b>\n" if current_name else ""
+
     await callback.message.edit_text(  # type: ignore
-        f"<b>🔗 Referral Program</b>\n\n"
+        f"<b>🎟️ Referral Program</b>\n\n"
+        f"{name_line}"
         f"Share your link to earn <b>{ref_pct}%</b> of your friends' trading fees.\n"
         f"They get a <b>{rebate_pct}%</b> fee rebate.\n\n"
         f"<b>Your link:</b>\n<code>{ref_link}</code>\n\n"
@@ -874,6 +896,48 @@ async def set_referral(callback: CallbackQuery):
         f"  Total earned: <b>${stats['total_earned']:,.2f}</b>\n"
         f"  Unclaimed: <b>${stats['unclaimed']:,.2f}</b>",
         reply_markup=kb,
+    )
+
+
+@router.callback_query(F.data == "ref:set_name")
+async def cb_set_username(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await state.set_state(ReferralStates.waiting_username)
+    user = await get_user(callback.from_user.id)
+    current = user.get("username", "") if user else ""
+    hint = f"\n\nCurrent: <b>@{current}</b>" if current else ""
+    await callback.message.edit_text(  # type: ignore
+        f"<b>Choose your username</b>\n\n"
+        f"Pick a unique name (3-15 chars, letters/numbers/underscore only).\n"
+        f"This is shown to your referrals and on your profile.{hint}",
+    )
+
+
+@router.message(ReferralStates.waiting_username)
+async def msg_set_username(message: Message, state: FSMContext):
+    import re
+    raw = (message.text or "").strip().lstrip("@")
+    tg_id = message.from_user.id  # type: ignore
+
+    if not re.match(r'^[a-zA-Z0-9_]{3,15}$', raw):
+        await message.answer(
+            "Invalid username. Use 3-15 characters: letters, numbers, underscore.\n"
+            "Try again:"
+        )
+        return
+
+    if await is_username_taken(raw, exclude_tg_id=tg_id):
+        await message.answer(
+            f"<b>@{raw}</b> is already taken. Try another one:"
+        )
+        return
+
+    await update_user(tg_id, username=raw)
+    await state.clear()
+    await message.answer(
+        f"<b>✅ Username set!</b>\n\n"
+        f"You are now <b>@{raw}</b>",
+        reply_markup=main_menu_kb(),
     )
 
 

@@ -40,6 +40,7 @@ async def _init_tables(db: aiosqlite.Connection):
             builder_approved INTEGER DEFAULT 0,
             ref_code TEXT UNIQUE,
             referred_by INTEGER,
+            username TEXT,
             settings TEXT DEFAULT '{}',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
@@ -92,6 +93,13 @@ async def _init_tables(db: aiosqlite.Connection):
         );
         """
     )
+    # Migrations for existing DBs
+    try:
+        await db.execute("ALTER TABLE users ADD COLUMN username TEXT")
+        await db.commit()
+    except Exception:
+        pass  # column already exists
+
     await db.commit()
 
 
@@ -271,6 +279,21 @@ async def get_user_by_ref_code(code: str) -> dict | None:
     ) as cursor:
         row = await cursor.fetchone()
         return dict(row) if row else None
+
+
+async def is_username_taken(username: str, exclude_tg_id: int | None = None) -> bool:
+    """Check if a username is already taken by another user."""
+    db = await get_db()
+    if exclude_tg_id:
+        async with db.execute(
+            "SELECT 1 FROM users WHERE username = ? AND telegram_id != ?",
+            (username, exclude_tg_id),
+        ) as cursor:
+            return (await cursor.fetchone()) is not None
+    async with db.execute(
+        "SELECT 1 FROM users WHERE username = ?", (username,)
+    ) as cursor:
+        return (await cursor.fetchone()) is not None
 
 
 # ------------------------------------------------------------------
