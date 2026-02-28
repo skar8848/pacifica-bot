@@ -293,7 +293,7 @@ class PacificaClient:
 
         Access codes use a different endpoint than referral codes.
         """
-        header = self._make_header("claim_whitelist_code")
+        header = self._make_header("claim_access_code")
         payload = {"code": code}
 
         if self.agent_wallet:
@@ -315,7 +315,7 @@ class PacificaClient:
 
             # Also claim for the main account (best effort)
             try:
-                header2 = self._make_header("claim_whitelist_code")
+                header2 = self._make_header("claim_access_code")
                 await self._post(
                     "/whitelist/claim",
                     self._build_request(header2, payload),
