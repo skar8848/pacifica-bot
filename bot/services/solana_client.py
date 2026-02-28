@@ -325,6 +325,39 @@ async def withdraw_from_pacifica(keypair: Keypair, amount_usdc: float) -> str:
     return sig
 
 
+async def send_usdc(from_keypair: Keypair, to_pubkey: str, amount_usdc: float) -> str:
+    """Send USDC from one wallet to another. Creates recipient ATA if needed. Returns signature."""
+    from_pub = from_keypair.pubkey()
+    to_pub = Pubkey.from_string(to_pubkey)
+
+    from_ata = get_ata(from_pub, USDC_MINT)
+    to_ata = get_ata(to_pub, USDC_MINT)
+
+    amount_raw = int(amount_usdc * 10**USDC_DECIMALS)
+
+    # Create recipient ATA if it doesn't exist (idempotent)
+    create_ata_ix = _create_ata_idempotent_ix(from_pub, to_pub, USDC_MINT)
+
+    # SPL Token transfer instruction
+    # Instruction index 3 = Transfer, data: u64 amount
+    transfer_data = struct.pack("<BQ", 3, amount_raw)
+    transfer_ix = Instruction(
+        TOKEN_PROGRAM,
+        transfer_data,
+        [
+            AccountMeta(from_ata, is_signer=False, is_writable=True),
+            AccountMeta(to_ata, is_signer=False, is_writable=True),
+            AccountMeta(from_pub, is_signer=True, is_writable=False),
+        ],
+    )
+
+    blockhash = await get_latest_blockhash()
+    raw = _build_and_sign(from_keypair, [create_ata_ix, transfer_ix], blockhash)
+    sig = await send_tx(raw)
+    logger.info("USDC transfer: %s -> %s (%.2f USDC) tx=%s", from_pub, to_pubkey, amount_usdc, sig)
+    return sig
+
+
 async def send_sol(from_keypair: Keypair, to_pubkey: str, amount_sol: float) -> str:
     """Send SOL from one wallet to another. Returns signature."""
     from_pub = from_keypair.pubkey()

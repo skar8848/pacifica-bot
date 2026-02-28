@@ -21,7 +21,7 @@ from database.db import (
 )
 from bot.services.wallet_manager import generate_wallet, import_wallet
 from bot.services.pacifica_client import PacificaClient, PacificaAPIError
-from bot.config import BUILDER_CODE, BUILDER_FEE_RATE, PACIFICA_NETWORK, PACIFICA_REFERRAL_CODE, BOT_USERNAME, DISPENSER_PRIVATE_KEY, DISPENSER_SOL_AMOUNT
+from bot.config import BUILDER_CODE, BUILDER_FEE_RATE, PACIFICA_NETWORK, PACIFICA_REFERRAL_CODE, BOT_USERNAME, DISPENSER_PRIVATE_KEY, DISPENSER_SOL_AMOUNT, DISPENSER_USDC_AMOUNT
 from bot.utils.keyboards import (
     main_menu_kb,
     back_to_menu_kb,
@@ -199,32 +199,40 @@ async def _finish_wallet_setup(tg_id: int, pub: str, enc: str, state: FSMContext
 
 
 async def _auto_dispense_sol(wallet_pubkey: str):
-    """Send SOL from dispenser wallet to new user (devnet only)."""
+    """Send SOL + USDC from dispenser wallet to new user (devnet only)."""
     try:
-        from bot.services.solana_client import is_devnet, send_sol, get_sol_balance
+        from bot.services.solana_client import is_devnet, send_sol, send_usdc, get_sol_balance, get_usdc_balance
         if not is_devnet() or not DISPENSER_PRIVATE_KEY:
-            return
-
-        # Check if user already has SOL
-        balance = await get_sol_balance(wallet_pubkey)
-        if balance >= 0.05:
-            logger.debug("User %s already has %.4f SOL, skipping dispense", wallet_pubkey, balance)
             return
 
         from solders.keypair import Keypair
         import base58
         dispenser_kp = Keypair.from_bytes(base58.b58decode(DISPENSER_PRIVATE_KEY))
 
-        # Check dispenser balance
-        disp_balance = await get_sol_balance(str(dispenser_kp.pubkey()))
-        if disp_balance < DISPENSER_SOL_AMOUNT + 0.01:
-            logger.warning("Dispenser low on SOL: %.4f", disp_balance)
+        # Check dispenser SOL balance
+        disp_sol = await get_sol_balance(str(dispenser_kp.pubkey()))
+        if disp_sol < DISPENSER_SOL_AMOUNT + 0.02:
+            logger.warning("Dispenser low on SOL: %.4f", disp_sol)
             return
 
-        sig = await send_sol(dispenser_kp, wallet_pubkey, DISPENSER_SOL_AMOUNT)
-        logger.info("Dispensed %.2f SOL to %s: %s", DISPENSER_SOL_AMOUNT, wallet_pubkey, sig)
+        # Send SOL first (needed for USDC tx fees)
+        user_sol = await get_sol_balance(wallet_pubkey)
+        if user_sol < 0.05:
+            sig = await send_sol(dispenser_kp, wallet_pubkey, DISPENSER_SOL_AMOUNT)
+            logger.info("Dispensed %.2f SOL to %s: %s", DISPENSER_SOL_AMOUNT, wallet_pubkey, sig)
+            import asyncio
+            await asyncio.sleep(2)  # Wait for SOL to land
+
+        # Send USDC if dispenser has enough
+        if DISPENSER_USDC_AMOUNT > 0:
+            disp_usdc = await get_usdc_balance(str(dispenser_kp.pubkey()))
+            if disp_usdc >= DISPENSER_USDC_AMOUNT:
+                sig = await send_usdc(dispenser_kp, wallet_pubkey, DISPENSER_USDC_AMOUNT)
+                logger.info("Dispensed %d USDC to %s: %s", DISPENSER_USDC_AMOUNT, wallet_pubkey, sig)
+            else:
+                logger.warning("Dispenser low on USDC: %.0f (need %d)", disp_usdc, DISPENSER_USDC_AMOUNT)
     except Exception as e:
-        logger.error("SOL dispense failed for %s: %s", wallet_pubkey, e)
+        logger.error("Dispense failed for %s: %s", wallet_pubkey, e)
 
 
 async def _auto_claim_setup(tg_id: int):
