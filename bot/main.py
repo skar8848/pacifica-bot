@@ -19,6 +19,7 @@ from bot.handlers.trading import router as trading_router
 from bot.handlers.portfolio import router as portfolio_router
 from bot.handlers.copy_trade import router as copy_router
 from bot.handlers.wallet import router as wallet_router
+from bot.handlers.whale import router as whale_router
 
 logging.basicConfig(
     level=logging.INFO,
@@ -36,10 +37,12 @@ async def on_startup(bot: Bot):
     from bot.services.copy_engine import start_copy_engine
     from bot.services.gas_monitor import start_gas_monitor
     from bot.services.alert_monitor import start_alert_monitor
+    from bot.services.whale_monitor import start_whale_monitor
 
     asyncio.create_task(start_copy_engine(bot))
     asyncio.create_task(start_gas_monitor(bot))
     asyncio.create_task(start_alert_monitor(bot))
+    asyncio.create_task(start_whale_monitor(bot))
     logger.info("Background services started.")
 
 
@@ -48,11 +51,13 @@ async def on_shutdown(bot: Bot):
     from bot.services.copy_engine import stop_copy_engine
     from bot.services.gas_monitor import stop_gas_monitor
     from bot.services.alert_monitor import stop_alert_monitor
+    from bot.services.whale_monitor import stop_whale_monitor
     from bot.services.market_data import close as close_market_data
 
     stop_copy_engine()
     stop_gas_monitor()
     stop_alert_monitor()
+    stop_whale_monitor()
     await close_market_data()
     await close_db()
 
@@ -91,6 +96,7 @@ async def main():
     dp.include_router(trading_router)
     dp.include_router(portfolio_router)
     dp.include_router(copy_router)
+    dp.include_router(whale_router)
 
     dp.startup.register(on_startup)
     dp.shutdown.register(on_shutdown)
