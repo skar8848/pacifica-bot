@@ -273,9 +273,10 @@ async def get_or_create_ref_code(telegram_id: int) -> str:
 
 
 async def get_user_by_ref_code(code: str) -> dict | None:
+    """Find user by ref_code OR username (both work as referral identifiers)."""
     db = await get_db()
     async with db.execute(
-        "SELECT * FROM users WHERE ref_code = ?", (code,)
+        "SELECT * FROM users WHERE ref_code = ? OR username = ?", (code, code)
     ) as cursor:
         row = await cursor.fetchone()
         return dict(row) if row else None

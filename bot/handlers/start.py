@@ -857,9 +857,11 @@ async def set_referral(callback: CallbackQuery):
         return
 
     ref_code = await get_or_create_ref_code(tg_id)
-    ref_link = f"https://t.me/{BOT_USERNAME}?start=ref_{ref_code}"
-    stats = await get_referral_stats(tg_id)
     current_name = user.get("username") or ""
+    # Use username as ref link if set, fallback to random code
+    ref_id = current_name if current_name else ref_code
+    ref_link = f"https://t.me/{BOT_USERNAME}?start=ref_{ref_id}"
+    stats = await get_referral_stats(tg_id)
 
     ref_pct = int(REFERRAL_FEE_SHARE * 100)
     rebate_pct = int(REFEREE_FEE_REBATE * 100)
