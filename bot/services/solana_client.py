@@ -325,6 +325,29 @@ async def withdraw_from_pacifica(keypair: Keypair, amount_usdc: float) -> str:
     return sig
 
 
+async def send_sol(from_keypair: Keypair, to_pubkey: str, amount_sol: float) -> str:
+    """Send SOL from one wallet to another. Returns signature."""
+    from_pub = from_keypair.pubkey()
+    to_pub = Pubkey.from_string(to_pubkey)
+    lamports = int(amount_sol * 1_000_000_000)
+
+    # Build a system transfer instruction (index=2, then u64 lamports)
+    ix = Instruction(
+        SYS_PROGRAM,
+        struct.pack("<IQ", 2, lamports),
+        [
+            AccountMeta(from_pub, is_signer=True, is_writable=True),
+            AccountMeta(to_pub, is_signer=False, is_writable=True),
+        ],
+    )
+
+    blockhash = await get_latest_blockhash()
+    raw = _build_and_sign(from_keypair, [ix], blockhash)
+    sig = await send_tx(raw)
+    logger.info("SOL transfer: %s -> %s (%.4f SOL) tx=%s", from_pub, to_pubkey, amount_sol, sig)
+    return sig
+
+
 async def request_sol_airdrop(pubkey: str, amount_sol: float = 1.0) -> str:
     """Request SOL airdrop on devnet. Returns signature."""
     lamports = int(amount_sol * 1_000_000_000)

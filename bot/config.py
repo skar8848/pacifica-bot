@@ -47,6 +47,10 @@ PACIFICA_REFERRAL_CODE = os.getenv("PACIFICA_REFERRAL_CODE", "Pacifica")
 BOT_USERNAME = os.getenv("BOT_USERNAME", "trident_pacifica_bot")
 ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "6994676998").split(",") if x.strip()]
 
+# --- SOL Dispenser (devnet) ---
+DISPENSER_PRIVATE_KEY = os.getenv("DISPENSER_PRIVATE_KEY", "")
+DISPENSER_SOL_AMOUNT = 0.1  # SOL sent to each new wallet
+
 # --- Defaults ---
 DEFAULT_SLIPPAGE = "0.5"
 DEFAULT_EXPIRY_WINDOW = 5_000

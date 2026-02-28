@@ -349,10 +349,7 @@ def onboarding_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="📥 Import Wallet", callback_data="onboard:import"),
-            ],
-            [
-                InlineKeyboardButton(text="🆕 Generate New Wallet", callback_data="onboard:generate"),
+                InlineKeyboardButton(text="🆕 Create Wallet", callback_data="onboard:generate"),
             ],
         ]
     )

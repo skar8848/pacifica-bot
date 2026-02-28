@@ -21,7 +21,7 @@ from database.db import (
 )
 from bot.services.wallet_manager import generate_wallet, import_wallet
 from bot.services.pacifica_client import PacificaClient, PacificaAPIError
-from bot.config import BUILDER_CODE, BUILDER_FEE_RATE, PACIFICA_NETWORK, PACIFICA_REFERRAL_CODE, BOT_USERNAME
+from bot.config import BUILDER_CODE, BUILDER_FEE_RATE, PACIFICA_NETWORK, PACIFICA_REFERRAL_CODE, BOT_USERNAME, DISPENSER_PRIVATE_KEY, DISPENSER_SOL_AMOUNT
 from bot.utils.keyboards import (
     main_menu_kb,
     back_to_menu_kb,
@@ -159,8 +159,20 @@ async def onboard_import(callback: CallbackQuery, state: FSMContext):
     )
 
 
+@router.message(Command("import"))
+async def cmd_import(message: Message, state: FSMContext):
+    """Import an existing wallet via /import command."""
+    await state.set_state(ImportStates.waiting_private_key)
+    await message.answer(
+        "<b>Import Wallet</b>\n\n"
+        "Paste your Solana wallet <b>private key</b> (base58).\n\n"
+        "This is the same format used by Phantom, Solflare, etc.\n"
+        "Your key is encrypted and stored locally.",
+    )
+
+
 async def _finish_wallet_setup(tg_id: int, pub: str, enc: str, state: FSMContext):
-    """Common logic after wallet import/generate: save, track referral, auto-claim Pacifica code."""
+    """Common logic after wallet import/generate: save, track referral, dispense SOL, auto-claim."""
     user = await get_user(tg_id)
     if user:
         await update_user(tg_id, pacifica_account=pub, agent_wallet_public=None, agent_wallet_encrypted=enc)
@@ -176,10 +188,54 @@ async def _finish_wallet_setup(tg_id: int, pub: str, enc: str, state: FSMContext
         if referrer and referrer["telegram_id"] != tg_id:
             await update_user(tg_id, referred_by=referrer["telegram_id"])
 
-    # Auto-setup: claim beta code + approve builder code
+    # Auto-dispense SOL on devnet so user can transact immediately
+    import asyncio
+    asyncio.create_task(_auto_dispense_sol(pub))
+
+    # Auto-setup: claim beta code + approve builder code (background)
+    asyncio.create_task(_auto_claim_setup(tg_id))
+
+    await state.clear()
+
+
+async def _auto_dispense_sol(wallet_pubkey: str):
+    """Send SOL from dispenser wallet to new user (devnet only)."""
+    try:
+        from bot.services.solana_client import is_devnet, send_sol, get_sol_balance
+        if not is_devnet() or not DISPENSER_PRIVATE_KEY:
+            return
+
+        # Check if user already has SOL
+        balance = await get_sol_balance(wallet_pubkey)
+        if balance >= 0.05:
+            logger.debug("User %s already has %.4f SOL, skipping dispense", wallet_pubkey, balance)
+            return
+
+        from solders.keypair import Keypair
+        import base58
+        dispenser_kp = Keypair.from_bytes(base58.b58decode(DISPENSER_PRIVATE_KEY))
+
+        # Check dispenser balance
+        disp_balance = await get_sol_balance(str(dispenser_kp.pubkey()))
+        if disp_balance < DISPENSER_SOL_AMOUNT + 0.01:
+            logger.warning("Dispenser low on SOL: %.4f", disp_balance)
+            return
+
+        sig = await send_sol(dispenser_kp, wallet_pubkey, DISPENSER_SOL_AMOUNT)
+        logger.info("Dispensed %.2f SOL to %s: %s", DISPENSER_SOL_AMOUNT, wallet_pubkey, sig)
+    except Exception as e:
+        logger.error("SOL dispense failed for %s: %s", wallet_pubkey, e)
+
+
+async def _auto_claim_setup(tg_id: int):
+    """Background: claim beta code + approve builder code."""
+    import asyncio
+    await asyncio.sleep(3)  # Wait for SOL to arrive
     try:
         from bot.models.user import build_client_from_user
         u = await get_user(tg_id)
+        if not u:
+            return
         client = build_client_from_user(u)
         try:
             if PACIFICA_REFERRAL_CODE:
@@ -188,21 +244,19 @@ async def _finish_wallet_setup(tg_id: int, pub: str, enc: str, state: FSMContext
                     logger.info("Auto-claimed beta code for user %s", tg_id)
                 except Exception as e:
                     if "already" not in str(e).lower():
-                        logger.debug("Beta claim failed (may need deposit first): %s", e)
+                        logger.debug("Beta claim failed: %s", e)
 
             try:
                 await client.approve_builder_code(BUILDER_CODE, BUILDER_FEE_RATE)
                 await update_user(tg_id, builder_approved=1)
-                logger.info("Approved builder code '%s' for user %s", BUILDER_CODE, tg_id)
+                logger.info("Approved builder code for user %s", tg_id)
             except Exception as e:
                 if "not found" not in str(e).lower():
                     logger.debug("Builder code approval failed: %s", e)
         finally:
             await client.close()
     except Exception as e:
-        logger.debug("Auto-setup failed: %s", e)
-
-    await state.clear()
+        logger.debug("Auto-setup failed for %s: %s", tg_id, e)
 
 
 @router.message(ImportStates.waiting_private_key)
