@@ -41,15 +41,21 @@ _dead_codes: set[str] = set()
 
 
 async def _try_claim_beta(client, tg_id: int) -> bool:
-    """Try claiming beta access using the code pool. Returns True if claimed."""
+    """Try claiming beta access. Tries DB codes first, then env pool."""
     from bot.config import BETA_CODE_POOL
+    from database.db import get_active_beta_codes, increment_beta_code_uses, deactivate_beta_code
 
-    for code in BETA_CODE_POOL:
+    # Build code list: DB codes (newest first) + env pool
+    db_codes = await get_active_beta_codes()
+    all_codes = db_codes + [c for c in BETA_CODE_POOL if c not in db_codes]
+
+    for code in all_codes:
         if code in _dead_codes:
             continue
         try:
             await client.claim_referral_code(code)
             logger.info("Claimed beta code '%s' for user %s", code, tg_id)
+            await increment_beta_code_uses(code)
             return True
         except Exception as e:
             err = str(e).lower()
@@ -57,11 +63,12 @@ async def _try_claim_beta(client, tg_id: int) -> bool:
                 return True  # User already has beta
             if "limit" in err or "invalid" in err or "not found" in err:
                 _dead_codes.add(code)
-                logger.info("Beta code '%s' is dead (skipping from now on)", code)
+                await deactivate_beta_code(code)
+                logger.info("Beta code '%s' is dead (deactivated)", code)
                 continue
             logger.debug("Beta code '%s' failed for %s: %s", code, tg_id, e)
             continue
-    logger.warning("All %d beta codes exhausted for user %s", len(BETA_CODE_POOL), tg_id)
+    logger.warning("All beta codes exhausted for user %s", tg_id)
     return False
 
 

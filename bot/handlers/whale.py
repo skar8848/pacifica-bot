@@ -225,3 +225,77 @@ async def cmd_lookup(msg: types.Message):
     )
 
     await msg.answer(text)
+
+
+# ------------------------------------------------------------------
+# /setcode <code> — add a beta code at runtime (admin only)
+# ------------------------------------------------------------------
+
+@router.message(Command("setcode"))
+async def cmd_setcode(msg: types.Message):
+    from bot.config import ADMIN_IDS
+    if msg.from_user.id not in ADMIN_IDS:
+        await msg.answer("Admin only.")
+        return
+
+    parts = (msg.text or "").split(maxsplit=1)
+    if len(parts) < 2 or not parts[1].strip():
+        await msg.answer(
+            "Usage: <code>/setcode YOUR_BETA_CODE</code>\n\n"
+            "Adds a beta/referral code that will be used for new users automatically.\n"
+            "No redeploy needed."
+        )
+        return
+
+    code = parts[1].strip()
+
+    from database.db import add_beta_code
+    added = await add_beta_code(code, added_by=msg.from_user.id)
+
+    if added:
+        # Clear from dead codes cache if it was there
+        from bot.handlers.wallet import _dead_codes
+        _dead_codes.discard(code)
+
+        await msg.answer(
+            f"✅ Beta code <code>{code}</code> added!\n\n"
+            f"It will be used first for new users. No redeploy needed."
+        )
+    else:
+        await msg.answer(f"Code <code>{code}</code> already exists.")
+
+
+# ------------------------------------------------------------------
+# /codes — list all beta codes (admin only)
+# ------------------------------------------------------------------
+
+@router.message(Command("codes"))
+async def cmd_codes(msg: types.Message):
+    from bot.config import ADMIN_IDS
+    if msg.from_user.id not in ADMIN_IDS:
+        await msg.answer("Admin only.")
+        return
+
+    from database.db import get_all_beta_codes
+    from bot.config import BETA_CODE_POOL
+
+    db_codes = await get_all_beta_codes()
+
+    lines = ["🔑 <b>Beta Codes</b>\n"]
+
+    if db_codes:
+        lines.append("<b>Runtime (DB):</b>")
+        for c in db_codes:
+            status = "✅" if c["active"] else "❌"
+            lines.append(
+                f"  {status} <code>{c['code']}</code> — {c['uses']} uses"
+            )
+
+    lines.append(f"\n<b>Env pool ({len(BETA_CODE_POOL)}):</b>")
+    from bot.handlers.wallet import _dead_codes
+    for code in BETA_CODE_POOL:
+        status = "❌" if code in _dead_codes else "✅"
+        lines.append(f"  {status} <code>{code}</code>")
+
+    lines.append(f"\n<i>/setcode CODE to add a new code</i>")
+    await msg.answer("\n".join(lines))

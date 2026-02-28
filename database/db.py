@@ -96,6 +96,15 @@ async def _init_tables(db: aiosqlite.Connection):
             claimed INTEGER DEFAULT 0,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
+
+        CREATE TABLE IF NOT EXISTS beta_codes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            code TEXT NOT NULL UNIQUE,
+            added_by INTEGER,
+            active INTEGER DEFAULT 1,
+            uses INTEGER DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
         """
     )
     # Migrations for existing DBs
@@ -481,3 +490,55 @@ async def get_referral_stats(telegram_id: int) -> dict:
         "unclaimed": unclaimed,
         "total_volume": total_volume,
     }
+
+
+# ------------------------------------------------------------------
+# Beta codes (runtime-managed)
+# ------------------------------------------------------------------
+
+async def add_beta_code(code: str, added_by: int | None = None) -> bool:
+    """Add a beta code. Returns True if added, False if duplicate."""
+    db = await get_db()
+    try:
+        await db.execute(
+            "INSERT INTO beta_codes (code, added_by) VALUES (?, ?)",
+            (code.strip(), added_by),
+        )
+        await db.commit()
+        return True
+    except Exception:
+        return False
+
+
+async def get_active_beta_codes() -> list[str]:
+    """Get all active beta codes, newest first."""
+    db = await get_db()
+    async with db.execute(
+        "SELECT code FROM beta_codes WHERE active = 1 ORDER BY created_at DESC"
+    ) as cursor:
+        return [row[0] async for row in cursor]
+
+
+async def deactivate_beta_code(code: str):
+    db = await get_db()
+    await db.execute(
+        "UPDATE beta_codes SET active = 0 WHERE code = ?", (code,)
+    )
+    await db.commit()
+
+
+async def increment_beta_code_uses(code: str):
+    db = await get_db()
+    await db.execute(
+        "UPDATE beta_codes SET uses = uses + 1 WHERE code = ?", (code,)
+    )
+    await db.commit()
+
+
+async def get_all_beta_codes() -> list[dict]:
+    """Get all beta codes with stats."""
+    db = await get_db()
+    async with db.execute(
+        "SELECT * FROM beta_codes ORDER BY created_at DESC"
+    ) as cursor:
+        return [dict(r) for r in await cursor.fetchall()]
