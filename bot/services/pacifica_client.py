@@ -243,7 +243,7 @@ class PacificaClient:
         )
 
     async def claim_referral_code(self, code: str) -> dict:
-        """Claim a referral code for beta/whitelist access.
+        """Claim a referral code (e.g. 'Pacifica') via /referral/user/code/claim.
 
         When using agent wallet mode, we claim for the SIGNER (agent wallet)
         because Pacifica checks beta access on the signer, not the account.
@@ -255,7 +255,7 @@ class PacificaClient:
         if self.agent_wallet:
             # 1. Claim for the signer (agent wallet) — Pacifica checks beta on signer
             logger.info(
-                "Claiming beta for signer %s (account=%s)",
+                "Claiming referral for signer %s (account=%s)",
                 self.agent_wallet, self.account,
             )
             _, sig1 = sign_message(header, payload, self.keypair)
@@ -268,7 +268,7 @@ class PacificaClient:
                 **payload,
             }
             result = await self._post("/referral/user/code/claim", body_signer)
-            logger.info("Beta claimed for signer %s", self.agent_wallet)
+            logger.info("Referral claimed for signer %s", self.agent_wallet)
 
             # 2. Also claim for the main account (best effort, uses a second code)
             try:
@@ -277,9 +277,9 @@ class PacificaClient:
                     "/referral/user/code/claim",
                     self._build_request(header2, payload),
                 )
-                logger.info("Beta also claimed for account %s", self.account)
+                logger.info("Referral also claimed for account %s", self.account)
             except Exception as e:
-                logger.debug("Main account beta claim (secondary): %s", e)
+                logger.debug("Main account referral claim (secondary): %s", e)
 
             return result
 
@@ -287,6 +287,72 @@ class PacificaClient:
             "/referral/user/code/claim",
             self._build_request(header, payload),
         )
+
+    async def claim_whitelist_code(self, code: str) -> dict:
+        """Claim an access/invite code (e.g. '8V48ZGS7468AM5WD') via /whitelist/claim.
+
+        Access codes use a different endpoint than referral codes.
+        """
+        header = self._make_header("claim_whitelist_code")
+        payload = {"code": code}
+
+        if self.agent_wallet:
+            logger.info(
+                "Claiming whitelist for signer %s (account=%s)",
+                self.agent_wallet, self.account,
+            )
+            _, sig1 = sign_message(header, payload, self.keypair)
+            body_signer = {
+                "account": self.agent_wallet,
+                "agent_wallet": None,
+                "signature": sig1,
+                "timestamp": header["timestamp"],
+                "expiry_window": header["expiry_window"],
+                **payload,
+            }
+            result = await self._post("/whitelist/claim", body_signer)
+            logger.info("Whitelist claimed for signer %s", self.agent_wallet)
+
+            # Also claim for the main account (best effort)
+            try:
+                header2 = self._make_header("claim_whitelist_code")
+                await self._post(
+                    "/whitelist/claim",
+                    self._build_request(header2, payload),
+                )
+                logger.info("Whitelist also claimed for account %s", self.account)
+            except Exception as e:
+                logger.debug("Main account whitelist claim (secondary): %s", e)
+
+            return result
+
+        return await self._post(
+            "/whitelist/claim",
+            self._build_request(header, payload),
+        )
+
+    async def claim_beta_code(self, code: str) -> dict:
+        """Try claiming a code — tries whitelist first, then referral.
+
+        Pacifica has two separate endpoints:
+        - /whitelist/claim for access/invite codes (16-char alphanumeric)
+        - /referral/user/code/claim for referral codes (short names like 'Pacifica')
+        """
+        # Try whitelist endpoint first
+        try:
+            result = await self.claim_whitelist_code(code)
+            logger.info("Code '%s' claimed via whitelist endpoint", code)
+            return result
+        except PacificaAPIError as e:
+            if e.status == 404 or "not found" in str(e).lower():
+                logger.debug("Code '%s' not on whitelist, trying referral...", code)
+            else:
+                raise
+
+        # Fall back to referral endpoint
+        result = await self.claim_referral_code(code)
+        logger.info("Code '%s' claimed via referral endpoint", code)
+        return result
 
     async def request_withdraw(self, amount: str) -> dict:
         """Request a USDC withdrawal from Pacifica."""

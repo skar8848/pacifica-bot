@@ -53,7 +53,7 @@ async def _try_claim_beta(client, tg_id: int) -> bool:
         if code in _dead_codes:
             continue
         try:
-            await client.claim_referral_code(code)
+            await client.claim_beta_code(code)
             logger.info("Claimed beta code '%s' for user %s", code, tg_id)
             await increment_beta_code_uses(code)
             return True
@@ -61,10 +61,14 @@ async def _try_claim_beta(client, tg_id: int) -> bool:
             err = str(e).lower()
             if "already" in err:
                 return True  # User already has beta
-            if "limit" in err or "invalid" in err or "not found" in err:
+            if "limit" in err or "not found" in err or "invalid code" in err:
                 _dead_codes.add(code)
                 await deactivate_beta_code(code)
                 logger.info("Beta code '%s' is dead (deactivated)", code)
+                continue
+            if "invalid message" in err:
+                # Signing error — not a dead code, but skip to next
+                logger.warning("Signing error for code '%s': %s", code, e)
                 continue
             logger.debug("Beta code '%s' failed for %s: %s", code, tg_id, e)
             continue
@@ -663,8 +667,8 @@ async def wallet_beta_code_input(message: Message, state: FSMContext):
     try:
         client = build_client_from_user(user)
         try:
-            # Claim the user-provided code
-            await client.claim_referral_code(code)
+            # Claim the user-provided code (tries whitelist then referral)
+            await client.claim_beta_code(code)
             results.append(f"✅ Beta code <code>{code}</code> claimed!")
 
             # Now approve builder code
