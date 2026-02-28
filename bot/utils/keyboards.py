@@ -363,15 +363,6 @@ def wallet_kb(sol_balance: float = 0, usdc_balance: float = 0) -> InlineKeyboard
     """Wallet action buttons. Shows devnet-only buttons when appropriate."""
     rows = []
 
-    # Devnet-only actions
-    if is_devnet():
-        devnet_row = []
-        if sol_balance < 0.05:
-            devnet_row.append(InlineKeyboardButton(text="☀️ SOL Faucet", callback_data="wallet:airdrop"))
-        devnet_row.append(InlineKeyboardButton(text="🚰 USDC Faucet", callback_data="wallet:faucet"))
-        if devnet_row:
-            rows.append(devnet_row)
-
     # Deposit / Withdraw
     rows.append([
         InlineKeyboardButton(text="💰 Deposit", callback_data="wallet:deposit"),
