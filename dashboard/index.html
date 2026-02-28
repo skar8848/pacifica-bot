@@ -1,0 +1,596 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Trident — Trade Perps on Pacifica from Telegram</title>
+    <meta name="description" content="The fastest way to trade perpetuals on Pacifica. One-tap trading, PnL sharing, copy trading, and leaderboards — all from Telegram.">
+    <meta property="og:title" content="Trident — Perp Trading Bot for Pacifica">
+    <meta property="og:description" content="Trade perpetuals on Pacifica from Telegram. Long, Short, Copy Trade, and Share PnL cards.">
+    <meta property="og:type" content="website">
+    <style>
+        :root {
+            --bg-dark: #0D1117;
+            --bg-card: #161B22;
+            --bg-card-hover: #1C2333;
+            --green: #10B981;
+            --green-dim: rgba(16, 185, 129, 0.15);
+            --red: #EF4444;
+            --red-dim: rgba(239, 68, 68, 0.15);
+            --blue: #38BDF8;
+            --purple: #8B5CF6;
+            --white: #FFFFFF;
+            --dim: #8B949E;
+            --border: #30363D;
+            --gradient: linear-gradient(135deg, #8B5CF6, #10B981);
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, sans-serif;
+            background: var(--bg-dark);
+            color: var(--white);
+            line-height: 1.6;
+            overflow-x: hidden;
+        }
+
+        /* Animated gradient background */
+        .hero-bg {
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 100vh;
+            background: radial-gradient(ellipse at 30% 20%, rgba(139, 92, 246, 0.12) 0%, transparent 60%),
+                        radial-gradient(ellipse at 70% 60%, rgba(16, 185, 129, 0.08) 0%, transparent 50%);
+            pointer-events: none;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 0 24px;
+        }
+
+        /* Nav */
+        nav {
+            padding: 20px 0;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            position: relative;
+            z-index: 10;
+        }
+
+        .logo {
+            font-size: 24px;
+            font-weight: 800;
+            letter-spacing: -0.5px;
+        }
+
+        .logo span {
+            background: var(--gradient);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .logo small {
+            font-size: 14px;
+            color: var(--dim);
+            font-weight: 400;
+            margin-left: 8px;
+        }
+
+        .nav-links a {
+            color: var(--dim);
+            text-decoration: none;
+            margin-left: 32px;
+            font-size: 15px;
+            transition: color 0.2s;
+        }
+
+        .nav-links a:hover { color: var(--white); }
+
+        /* Hero */
+        .hero {
+            text-align: center;
+            padding: 100px 0 80px;
+            position: relative;
+            z-index: 10;
+        }
+
+        .hero-badge {
+            display: inline-block;
+            padding: 6px 16px;
+            border-radius: 20px;
+            border: 1px solid var(--border);
+            font-size: 13px;
+            color: var(--dim);
+            margin-bottom: 24px;
+        }
+
+        .hero-badge span { color: var(--green); }
+
+        h1 {
+            font-size: clamp(40px, 6vw, 72px);
+            font-weight: 800;
+            line-height: 1.1;
+            letter-spacing: -2px;
+            margin-bottom: 24px;
+        }
+
+        h1 .gradient {
+            background: var(--gradient);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .hero p {
+            font-size: 20px;
+            color: var(--dim);
+            max-width: 600px;
+            margin: 0 auto 40px;
+        }
+
+        .cta-group {
+            display: flex;
+            gap: 16px;
+            justify-content: center;
+            flex-wrap: wrap;
+        }
+
+        .btn-primary {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 14px 32px;
+            background: var(--gradient);
+            color: white;
+            border: none;
+            border-radius: 12px;
+            font-size: 16px;
+            font-weight: 600;
+            text-decoration: none;
+            cursor: pointer;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 30px rgba(139, 92, 246, 0.3);
+        }
+
+        .btn-secondary {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 14px 32px;
+            background: transparent;
+            color: var(--white);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            font-size: 16px;
+            font-weight: 600;
+            text-decoration: none;
+            cursor: pointer;
+            transition: border-color 0.2s, background 0.2s;
+        }
+
+        .btn-secondary:hover {
+            border-color: var(--dim);
+            background: rgba(255, 255, 255, 0.03);
+        }
+
+        /* Stats bar */
+        .stats {
+            display: flex;
+            justify-content: center;
+            gap: 60px;
+            padding: 40px 0;
+            border-top: 1px solid var(--border);
+            border-bottom: 1px solid var(--border);
+            margin: 0 0 80px;
+        }
+
+        .stat {
+            text-align: center;
+        }
+
+        .stat-value {
+            font-size: 32px;
+            font-weight: 700;
+            margin-bottom: 4px;
+        }
+
+        .stat-value.green { color: var(--green); }
+        .stat-value.purple { color: var(--purple); }
+        .stat-value.blue { color: var(--blue); }
+
+        .stat-label {
+            font-size: 14px;
+            color: var(--dim);
+        }
+
+        /* Features grid */
+        .section-title {
+            text-align: center;
+            margin-bottom: 60px;
+        }
+
+        .section-title h2 {
+            font-size: 36px;
+            font-weight: 700;
+            margin-bottom: 12px;
+        }
+
+        .section-title p {
+            color: var(--dim);
+            font-size: 18px;
+        }
+
+        .features {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+            gap: 20px;
+            margin-bottom: 100px;
+        }
+
+        .feature-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            padding: 32px;
+            transition: border-color 0.3s, transform 0.2s;
+        }
+
+        .feature-card:hover {
+            border-color: var(--purple);
+            transform: translateY(-4px);
+        }
+
+        .feature-icon {
+            font-size: 32px;
+            margin-bottom: 16px;
+        }
+
+        .feature-card h3 {
+            font-size: 20px;
+            font-weight: 600;
+            margin-bottom: 8px;
+        }
+
+        .feature-card p {
+            color: var(--dim);
+            font-size: 15px;
+            line-height: 1.7;
+        }
+
+        .feature-tag {
+            display: inline-block;
+            padding: 3px 10px;
+            border-radius: 6px;
+            font-size: 12px;
+            font-weight: 500;
+            margin-top: 12px;
+        }
+
+        .tag-live { background: var(--green-dim); color: var(--green); }
+        .tag-soon { background: rgba(56, 189, 248, 0.15); color: var(--blue); }
+
+        /* Commands showcase */
+        .commands {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 20px;
+            padding: 60px;
+            margin-bottom: 100px;
+        }
+
+        .commands h2 {
+            font-size: 32px;
+            font-weight: 700;
+            margin-bottom: 40px;
+            text-align: center;
+        }
+
+        .cmd-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 16px;
+        }
+
+        .cmd {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+            padding: 16px 20px;
+            border-radius: 12px;
+            background: var(--bg-dark);
+            border: 1px solid transparent;
+            transition: border-color 0.2s;
+        }
+
+        .cmd:hover { border-color: var(--border); }
+
+        .cmd code {
+            font-family: 'SF Mono', 'Fira Code', monospace;
+            color: var(--green);
+            font-size: 14px;
+            white-space: nowrap;
+        }
+
+        .cmd span {
+            color: var(--dim);
+            font-size: 14px;
+        }
+
+        /* How it works */
+        .steps {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 40px;
+            margin-bottom: 100px;
+        }
+
+        .step {
+            text-align: center;
+        }
+
+        .step-number {
+            width: 48px;
+            height: 48px;
+            border-radius: 50%;
+            background: var(--gradient);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 700;
+            font-size: 20px;
+            margin: 0 auto 20px;
+        }
+
+        .step h3 {
+            font-size: 20px;
+            margin-bottom: 8px;
+        }
+
+        .step p {
+            color: var(--dim);
+            font-size: 15px;
+        }
+
+        /* CTA */
+        .cta-section {
+            text-align: center;
+            padding: 80px 0;
+            border-top: 1px solid var(--border);
+        }
+
+        .cta-section h2 {
+            font-size: 40px;
+            font-weight: 700;
+            margin-bottom: 16px;
+        }
+
+        .cta-section p {
+            color: var(--dim);
+            font-size: 18px;
+            margin-bottom: 32px;
+        }
+
+        /* Footer */
+        footer {
+            padding: 40px 0;
+            border-top: 1px solid var(--border);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            color: var(--dim);
+            font-size: 14px;
+        }
+
+        footer a {
+            color: var(--dim);
+            text-decoration: none;
+        }
+
+        footer a:hover { color: var(--white); }
+
+        .footer-links {
+            display: flex;
+            gap: 24px;
+        }
+
+        /* Responsive */
+        @media (max-width: 768px) {
+            .stats { flex-direction: column; gap: 24px; }
+            .steps { grid-template-columns: 1fr; }
+            .commands { padding: 32px 20px; }
+            .nav-links { display: none; }
+            footer { flex-direction: column; gap: 16px; text-align: center; }
+        }
+    </style>
+</head>
+<body>
+    <div class="hero-bg"></div>
+
+    <div class="container">
+        <nav>
+            <div class="logo"><span>TRIDENT</span> <small>on Pacifica</small></div>
+            <div class="nav-links">
+                <a href="#features">Features</a>
+                <a href="#commands">Commands</a>
+                <a href="#how">Get Started</a>
+                <a href="https://github.com/skar8848/pacifica-bot" target="_blank">GitHub</a>
+            </div>
+        </nav>
+
+        <section class="hero">
+            <div class="hero-badge">Built for the <span>Pacifica Hackathon</span></div>
+            <h1>Trade Perps from<br><span class="gradient">Telegram</span></h1>
+            <p>The fastest way to Long, Short, and Copy Trade perpetuals on Pacifica. One-tap execution, shareable PnL cards, and built-in leaderboards.</p>
+            <div class="cta-group">
+                <a href="https://t.me/trident_pacifica_bot" class="btn-primary">
+                    Open in Telegram
+                </a>
+                <a href="https://github.com/skar8848/pacifica-bot" class="btn-secondary">
+                    View Source
+                </a>
+            </div>
+        </section>
+
+        <section class="stats">
+            <div class="stat">
+                <div class="stat-value green">35+</div>
+                <div class="stat-label">Perpetual Markets</div>
+            </div>
+            <div class="stat">
+                <div class="stat-value purple">50x</div>
+                <div class="stat-label">Max Leverage</div>
+            </div>
+            <div class="stat">
+                <div class="stat-value blue">< 1s</div>
+                <div class="stat-label">Order Execution</div>
+            </div>
+            <div class="stat">
+                <div class="stat-value green">0.05%</div>
+                <div class="stat-label">Builder Fee</div>
+            </div>
+        </section>
+
+        <section id="features">
+            <div class="section-title">
+                <h2>Everything you need to trade perps</h2>
+                <p>From instant execution to social trading — all inside Telegram</p>
+            </div>
+
+            <div class="features">
+                <div class="feature-card">
+                    <div class="feature-icon">&#9889;</div>
+                    <h3>One-Tap Trading</h3>
+                    <p>Open Long or Short positions with inline buttons. Select amount, leverage, and execute — all without leaving the chat.</p>
+                    <span class="feature-tag tag-live">Live</span>
+                </div>
+
+                <div class="feature-card">
+                    <div class="feature-icon">&#128248;</div>
+                    <h3>PnL Share Cards</h3>
+                    <p>Auto-generated trade cards when you close a position. Share your wins (or losses) on Twitter and Telegram groups.</p>
+                    <span class="feature-tag tag-live">Live</span>
+                </div>
+
+                <div class="feature-card">
+                    <div class="feature-icon">&#128101;</div>
+                    <h3>Copy Trading</h3>
+                    <p>Follow top wallets and automatically mirror their positions. Set your own size multiplier and max exposure.</p>
+                    <span class="feature-tag tag-soon">Coming Soon</span>
+                </div>
+
+                <div class="feature-card">
+                    <div class="feature-icon">&#127942;</div>
+                    <h3>Leaderboards</h3>
+                    <p>Compete with other traders. Per-group rankings and global leaderboard based on PnL performance.</p>
+                    <span class="feature-tag tag-soon">Coming Soon</span>
+                </div>
+
+                <div class="feature-card">
+                    <div class="feature-icon">&#127919;</div>
+                    <h3>TP/SL Management</h3>
+                    <p>Set Take Profit and Stop Loss on any position. Partial closes at 25%, 50%, or 75% with one tap.</p>
+                    <span class="feature-tag tag-live">Live</span>
+                </div>
+
+                <div class="feature-card">
+                    <div class="feature-icon">&#128176;</div>
+                    <h3>Referral System</h3>
+                    <p>Earn 10% of your referrals' trading fees. They get 5% fee rebate. Custom @username referral links.</p>
+                    <span class="feature-tag tag-live">Live</span>
+                </div>
+            </div>
+        </section>
+
+        <section id="commands" class="commands">
+            <h2>Trade with simple commands</h2>
+            <div class="cmd-grid">
+                <div class="cmd">
+                    <code>/start</code>
+                    <span>Create wallet and start trading</span>
+                </div>
+                <div class="cmd">
+                    <code>/long BTC 100 10x</code>
+                    <span>Open a $100 Long with 10x leverage</span>
+                </div>
+                <div class="cmd">
+                    <code>/short ETH 50 5x</code>
+                    <span>Open a $50 Short with 5x leverage</span>
+                </div>
+                <div class="cmd">
+                    <code>/positions</code>
+                    <span>View all open positions with PnL</span>
+                </div>
+                <div class="cmd">
+                    <code>/close BTC</code>
+                    <span>Close your BTC position</span>
+                </div>
+                <div class="cmd">
+                    <code>/copy &lt;wallet&gt;</code>
+                    <span>Start copy trading a wallet</span>
+                </div>
+                <div class="cmd">
+                    <code>/pnl</code>
+                    <span>Portfolio performance summary</span>
+                </div>
+                <div class="cmd">
+                    <code>/balance</code>
+                    <span>Check account equity and balance</span>
+                </div>
+            </div>
+        </section>
+
+        <section id="how">
+            <div class="section-title">
+                <h2>Start trading in 30 seconds</h2>
+                <p>No KYC, no downloads, no extensions</p>
+            </div>
+
+            <div class="steps">
+                <div class="step">
+                    <div class="step-number">1</div>
+                    <h3>Open the Bot</h3>
+                    <p>Click "Open in Telegram" and hit /start. A Solana wallet is generated instantly.</p>
+                </div>
+                <div class="step">
+                    <div class="step-number">2</div>
+                    <h3>Fund Your Wallet</h3>
+                    <p>Send SOL to your wallet address. On testnet, SOL and USDC are auto-dispensed.</p>
+                </div>
+                <div class="step">
+                    <div class="step-number">3</div>
+                    <h3>Trade</h3>
+                    <p>Pick a market, choose Long or Short, set your leverage, and execute. That's it.</p>
+                </div>
+            </div>
+        </section>
+
+        <section class="cta-section">
+            <h2>Ready to trade?</h2>
+            <p>Join the first Telegram trading bot on Pacifica</p>
+            <a href="https://t.me/trident_pacifica_bot" class="btn-primary">
+                Start Trading on Telegram
+            </a>
+        </section>
+
+        <footer>
+            <div>
+                <strong>Trident</strong> — Built for the Pacifica Hackathon 2026
+            </div>
+            <div class="footer-links">
+                <a href="https://pacifica.fi" target="_blank">Pacifica</a>
+                <a href="https://github.com/skar8848/pacifica-bot" target="_blank">GitHub</a>
+                <a href="https://t.me/trident_pacifica_bot" target="_blank">Telegram</a>
+            </div>
+        </footer>
+    </div>
+</body>
+</html>
