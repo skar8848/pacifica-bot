@@ -55,7 +55,12 @@ async def _ensure_beta_claimed(user: dict) -> None:
                     await client.claim_referral_code(PACIFICA_REFERRAL_CODE)
                     logger.info("Auto-claimed beta code for user %s before trade", tg_id)
                 except Exception as e:
-                    if "already" not in str(e).lower():
+                    err = str(e).lower()
+                    if "already" in err:
+                        pass  # Already claimed
+                    elif "limit" in err:
+                        logger.info("Beta code limit reached for user %s", tg_id)
+                    else:
                         logger.debug("Beta claim before trade failed: %s", e)
 
             # 2) Approve builder code
@@ -65,7 +70,10 @@ async def _ensure_beta_claimed(user: dict) -> None:
                     await update_user(tg_id, builder_approved=1)
                     logger.info("Approved builder code for user %s before trade", tg_id)
                 except Exception as e:
-                    if "already" not in str(e).lower():
+                    err = str(e).lower()
+                    if "already" in err:
+                        await update_user(tg_id, builder_approved=1)
+                    elif "not found" not in err:
                         logger.debug("Builder approve before trade failed: %s", e)
         finally:
             await client.close()
@@ -265,14 +273,21 @@ async def cb_chart(callback: CallbackQuery):
 
     chart_bytes = await generate_chart(symbol, interval="1h", num_candles=48)
     if not chart_bytes:
-        await callback.message.answer(  # type: ignore
+        await callback.message.edit_text(  # type: ignore
             f"Chart unavailable for {symbol}.",
             reply_markup=market_detail_kb(symbol),
         )
         return
 
+    # Delete the old message to avoid stale buttons above the chart
+    try:
+        await callback.message.delete()  # type: ignore
+    except Exception:
+        pass
+
     photo = BufferedInputFile(chart_bytes, filename=f"chart_{symbol}.png")
-    await callback.message.answer_photo(  # type: ignore
+    await callback.bot.send_photo(  # type: ignore
+        chat_id=callback.from_user.id,
         photo=photo,
         caption=f"📈 <b>{symbol}</b> — 1H candles",
         reply_markup=market_detail_kb(symbol),

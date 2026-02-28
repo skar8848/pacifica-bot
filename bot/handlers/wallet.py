@@ -55,8 +55,12 @@ async def _auto_claim_beta(tg_id: int):
                         await bc.claim_referral_code(PACIFICA_REFERRAL_CODE)
                         logger.info("Claimed beta code for %s (attempt %d)", tg_id, attempt + 1)
                     except Exception as e:
-                        if "already" in str(e).lower():
+                        err = str(e).lower()
+                        if "already" in err:
                             logger.debug("Beta code already claimed for %s", tg_id)
+                        elif "limit" in err:
+                            logger.info("Beta code limit reached, user %s must enter their own", tg_id)
+                            return  # Don't retry — code is exhausted
                         else:
                             raise
 
@@ -66,8 +70,11 @@ async def _auto_claim_beta(tg_id: int):
                     await update_user(tg_id, builder_approved=1)
                     logger.info("Approved builder code for %s (attempt %d)", tg_id, attempt + 1)
                 except Exception as e:
-                    if "not found" in str(e).lower():
+                    err = str(e).lower()
+                    if "not found" in err:
                         logger.debug("Builder code '%s' not registered yet, skipping", BUILDER_CODE)
+                    elif "already" in err:
+                        await update_user(tg_id, builder_approved=1)
                     else:
                         raise
             finally:
@@ -81,6 +88,7 @@ async def _auto_claim_beta(tg_id: int):
 class WalletStates(StatesGroup):
     waiting_deposit_amount = State()
     waiting_withdraw_amount = State()
+    waiting_beta_code = State()
 
 
 # ------------------------------------------------------------------
@@ -526,7 +534,7 @@ async def msg_withdraw_amount(message: Message, state: FSMContext):
 # ------------------------------------------------------------------
 
 @router.callback_query(F.data == "wallet:claim_beta")
-async def wallet_claim_beta(callback: CallbackQuery):
+async def wallet_claim_beta(callback: CallbackQuery, state: FSMContext):
     """Manually claim the Pacifica beta code + approve builder code."""
     user = await get_user(callback.from_user.id)
     if not user or not user.get("pacifica_account"):
@@ -537,30 +545,112 @@ async def wallet_claim_beta(callback: CallbackQuery):
 
     from bot.models.user import build_client_from_user
     from bot.config import BUILDER_CODE, BUILDER_FEE_RATE, PACIFICA_REFERRAL_CODE
+    from bot.utils.keyboards import InlineKeyboardMarkup, InlineKeyboardButton
+
+    beta_claimed = False
+    results = []
+
+    try:
+        client = build_client_from_user(user)
+        try:
+            # Try default referral code first
+            if PACIFICA_REFERRAL_CODE:
+                try:
+                    await client.claim_referral_code(PACIFICA_REFERRAL_CODE)
+                    results.append(f"✅ Beta code <code>{PACIFICA_REFERRAL_CODE}</code> claimed!")
+                    beta_claimed = True
+                except Exception as e:
+                    err = str(e)
+                    if "already" in err.lower():
+                        results.append("✅ Beta code already claimed")
+                        beta_claimed = True
+                    elif "limit" in err.lower() or "500" in err:
+                        # Code exhausted — ask user for their own code
+                        pass
+                    else:
+                        results.append(f"❌ Beta code: {err}")
+
+            if beta_claimed:
+                # Approve builder code
+                try:
+                    await client.approve_builder_code(BUILDER_CODE, BUILDER_FEE_RATE)
+                    await update_user(callback.from_user.id, builder_approved=1)
+                    results.append(f"✅ Builder code <code>{BUILDER_CODE}</code> approved!")
+                except Exception as e:
+                    err = str(e)
+                    if "already" in err.lower():
+                        results.append("✅ Builder code already approved")
+                        await update_user(callback.from_user.id, builder_approved=1)
+                    elif "not found" in err.lower():
+                        results.append(f"⏳ Builder code <code>{BUILDER_CODE}</code> not registered on Pacifica yet")
+                    else:
+                        results.append(f"❌ Builder code: {err}")
+        finally:
+            await client.close()
+    except Exception as e:
+        results.append(f"❌ Error: {e}")
+
+    # If beta wasn't claimed, ask user for their own referral code
+    if not beta_claimed:
+        await state.set_state(WalletStates.waiting_beta_code)
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="❌ Cancel", callback_data="nav:menu")],
+        ])
+        await callback.message.edit_text(  # type: ignore
+            "<b>Beta Activation</b>\n\n"
+            "The default beta code has reached its limit.\n\n"
+            "Please enter your Pacifica referral/beta code below.\n"
+            "You can get one from the Pacifica Discord or from another user.",
+            reply_markup=kb,
+        )
+        return
+
+    footer = "You can trade now!"
+    await callback.message.edit_text(  # type: ignore
+        f"<b>Beta Activation</b>\n\n" + "\n".join(results) + f"\n\n{footer}",
+        reply_markup=main_menu_kb(),
+    )
+
+
+@router.message(WalletStates.waiting_beta_code)
+async def wallet_beta_code_input(message: Message, state: FSMContext):
+    """User entered a custom beta/referral code."""
+    code = (message.text or "").strip()
+    await state.clear()
+
+    if not code or len(code) < 2:
+        await message.answer(
+            "Invalid code. Try again via Settings > Activate Beta.",
+            reply_markup=main_menu_kb(),
+        )
+        return
+
+    user = await get_user(message.from_user.id)  # type: ignore
+    if not user or not user.get("pacifica_account"):
+        await message.answer("Set up your wallet first!", reply_markup=main_menu_kb())
+        return
+
+    from bot.models.user import build_client_from_user
+    from bot.config import BUILDER_CODE, BUILDER_FEE_RATE
 
     results = []
     try:
         client = build_client_from_user(user)
         try:
-            if PACIFICA_REFERRAL_CODE:
-                try:
-                    await client.claim_referral_code(PACIFICA_REFERRAL_CODE)
-                    results.append(f"✅ Beta code <code>{PACIFICA_REFERRAL_CODE}</code> claimed!")
-                except Exception as e:
-                    err = str(e)
-                    if "already" in err.lower():
-                        results.append("✅ Beta code already claimed")
-                    else:
-                        results.append(f"❌ Beta code: {err}")
+            # Claim the user-provided code
+            await client.claim_referral_code(code)
+            results.append(f"✅ Beta code <code>{code}</code> claimed!")
 
+            # Now approve builder code
             try:
                 await client.approve_builder_code(BUILDER_CODE, BUILDER_FEE_RATE)
-                await update_user(callback.from_user.id, builder_approved=1)
+                await update_user(message.from_user.id, builder_approved=1)  # type: ignore
                 results.append(f"✅ Builder code <code>{BUILDER_CODE}</code> approved!")
             except Exception as e:
                 err = str(e)
                 if "already" in err.lower():
                     results.append("✅ Builder code already approved")
+                    await update_user(message.from_user.id, builder_approved=1)  # type: ignore
                 elif "not found" in err.lower():
                     results.append(f"⏳ Builder code <code>{BUILDER_CODE}</code> not registered on Pacifica yet")
                 else:
@@ -568,12 +658,15 @@ async def wallet_claim_beta(callback: CallbackQuery):
         finally:
             await client.close()
     except Exception as e:
-        results.append(f"❌ Error: {e}")
+        err = str(e)
+        if "already" in err.lower():
+            results.append("✅ Beta code already claimed")
+        else:
+            results.append(f"❌ Code <code>{code}</code> failed: {err}")
+            results.append("\nCheck the code and try again via Settings > Activate Beta.")
 
-    can_trade = any("Beta code" in r and "✅" in r for r in results)
-    footer = "You can trade now!" if can_trade else "Fix the issues above to start trading."
-    await callback.message.edit_text(  # type: ignore
-        f"<b>Beta Activation</b>\n\n" + "\n".join(results) + f"\n\n{footer}",
+    await message.answer(
+        "<b>Beta Activation</b>\n\n" + "\n".join(results),
         reply_markup=main_menu_kb(),
     )
 
