@@ -100,16 +100,38 @@ class TradeStates(StatesGroup):
 _price_client: "PacificaClient | None" = None
 
 async def _get_price(symbol: str) -> float | None:
-    """Fetch latest trade price for a symbol (reuses a shared client)."""
+    """Fetch latest price for a symbol.
+
+    Tries /trades first (most accurate), then falls back to /info/prices
+    which covers all markets including low-volume ones like PLTR.
+    """
     global _price_client
     try:
         from bot.services.pacifica_client import PacificaClient
         if _price_client is None or (_price_client._session and _price_client._session.closed):
             from solders.keypair import Keypair
             _price_client = PacificaClient(account="public", keypair=Keypair())
-        trades = await _price_client.get_trades(symbol, limit=1)
-        if trades:
-            return float(trades[0]["price"])
+
+        # Try recent trades first (most accurate)
+        try:
+            trades = await _price_client.get_trades(symbol, limit=1)
+            if trades:
+                return float(trades[0]["price"])
+        except Exception:
+            pass
+
+        # Fallback: /info/prices covers all markets
+        try:
+            prices = await _price_client.get_prices()
+            if isinstance(prices, list):
+                p = next((x for x in prices if x.get("symbol") == symbol), None)
+                if p:
+                    return float(p.get("mark_price") or p.get("index_price") or p.get("price", 0))
+            elif isinstance(prices, dict):
+                if symbol in prices:
+                    return float(prices[symbol])
+        except Exception:
+            pass
     except Exception:
         pass
     return None

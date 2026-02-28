@@ -43,11 +43,29 @@ async def _get_ro_client() -> PacificaClient:
 
 
 async def _get_price(symbol: str) -> float:
-    """Fetch latest trade price for a symbol."""
+    """Fetch latest price for a symbol (trades first, then /info/prices fallback)."""
     client = await _get_ro_client()
-    trades = await client.get_trades(symbol, limit=1)
-    if trades:
-        return float(trades[0]["price"])
+
+    # Try recent trades first
+    try:
+        trades = await client.get_trades(symbol, limit=1)
+        if trades:
+            return float(trades[0]["price"])
+    except Exception:
+        pass
+
+    # Fallback: /info/prices covers all markets
+    try:
+        prices = await client.get_prices()
+        if isinstance(prices, list):
+            p = next((x for x in prices if x.get("symbol") == symbol), None)
+            if p:
+                return float(p.get("mark_price") or p.get("index_price") or p.get("price", 0))
+        elif isinstance(prices, dict) and symbol in prices:
+            return float(prices[symbol])
+    except Exception:
+        pass
+
     return 0.0
 
 
