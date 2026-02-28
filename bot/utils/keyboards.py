@@ -331,20 +331,71 @@ def copy_menu_kb() -> InlineKeyboardMarkup:
     )
 
 
-def copy_settings_kb(wallet: str) -> InlineKeyboardMarkup:
-    w = wallet[:8]
+def copy_settings_kb(wallet: str, setup: dict | None = None) -> InlineKeyboardMarkup:
+    """Copy trading settings keyboard with sizing modes."""
+    s = setup or {}
+    mode = s.get("sizing_mode", "fixed_usd")
+
+    # Sizing mode row — highlight active mode
+    mode_row = [
+        InlineKeyboardButton(
+            text=f"{'> ' if mode == 'fixed_usd' else ''}$ Fixed",
+            callback_data=f"cmode:{wallet}:fixed_usd",
+        ),
+        InlineKeyboardButton(
+            text=f"{'> ' if mode == 'pct_equity' else ''}% Equity",
+            callback_data=f"cmode:{wallet}:pct_equity",
+        ),
+        InlineKeyboardButton(
+            text=f"{'> ' if mode == 'proportional' else ''}Ratio",
+            callback_data=f"cmode:{wallet}:proportional",
+        ),
+    ]
+
+    # Amount row — depends on mode
+    if mode == "fixed_usd":
+        amount_row = [
+            InlineKeyboardButton(text="$5", callback_data=f"camt:{wallet}:5"),
+            InlineKeyboardButton(text="$10", callback_data=f"camt:{wallet}:10"),
+            InlineKeyboardButton(text="$25", callback_data=f"camt:{wallet}:25"),
+            InlineKeyboardButton(text="$50", callback_data=f"camt:{wallet}:50"),
+        ]
+    elif mode == "pct_equity":
+        amount_row = [
+            InlineKeyboardButton(text="2%", callback_data=f"cpct:{wallet}:2"),
+            InlineKeyboardButton(text="5%", callback_data=f"cpct:{wallet}:5"),
+            InlineKeyboardButton(text="10%", callback_data=f"cpct:{wallet}:10"),
+            InlineKeyboardButton(text="20%", callback_data=f"cpct:{wallet}:20"),
+        ]
+    else:  # proportional
+        amount_row = [
+            InlineKeyboardButton(text="0.25x", callback_data=f"cm:{wallet}:0.25"),
+            InlineKeyboardButton(text="0.5x", callback_data=f"cm:{wallet}:0.5"),
+            InlineKeyboardButton(text="1x", callback_data=f"cm:{wallet}:1.0"),
+            InlineKeyboardButton(text="2x", callback_data=f"cm:{wallet}:2.0"),
+        ]
+
+    # Min trade filter
+    min_row = [
+        InlineKeyboardButton(text="Min: Off", callback_data=f"cmin:{wallet}:0"),
+        InlineKeyboardButton(text="Min $50", callback_data=f"cmin:{wallet}:50"),
+        InlineKeyboardButton(text="Min $100", callback_data=f"cmin:{wallet}:100"),
+        InlineKeyboardButton(text="Min $500", callback_data=f"cmin:{wallet}:500"),
+    ]
+
+    # Max position cap
+    max_row = [
+        InlineKeyboardButton(text="Cap $500", callback_data=f"cx:{wallet}:500"),
+        InlineKeyboardButton(text="Cap $1K", callback_data=f"cx:{wallet}:1000"),
+        InlineKeyboardButton(text="Cap $5K", callback_data=f"cx:{wallet}:5000"),
+    ]
+
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [
-                InlineKeyboardButton(text="1x", callback_data=f"cm:{w}:1.0"),
-                InlineKeyboardButton(text="0.5x", callback_data=f"cm:{w}:0.5"),
-                InlineKeyboardButton(text="0.25x", callback_data=f"cm:{w}:0.25"),
-            ],
-            [
-                InlineKeyboardButton(text="Max $500", callback_data=f"cx:{w}:500"),
-                InlineKeyboardButton(text="Max $1K", callback_data=f"cx:{w}:1000"),
-                InlineKeyboardButton(text="Max $5K", callback_data=f"cx:{w}:5000"),
-            ],
+            mode_row,
+            amount_row,
+            min_row,
+            max_row,
             [
                 InlineKeyboardButton(text="✅ Start Copying", callback_data=f"copy_go:{wallet}"),
                 InlineKeyboardButton(text="❌ Cancel", callback_data="nav:copy"),

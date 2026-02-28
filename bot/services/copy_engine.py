@@ -1,8 +1,14 @@
 """
 Copy trading engine — polls master wallets and replicates positions.
+
+Sizing modes:
+  - fixed_usd: fixed dollar amount per trade (e.g. $10)
+  - pct_equity: percentage of user's equity per trade (e.g. 5%)
+  - proportional: multiply master's position size (e.g. 0.5x)
 """
 
 import asyncio
+import math
 import logging
 from typing import Any
 
@@ -23,6 +29,64 @@ logger = logging.getLogger(__name__)
 _running = False
 # Track last known positions per master: {master_wallet: {symbol: position_dict}}
 _master_snapshots: dict[str, dict[str, dict]] = {}
+
+# Shared read-only client for fetching prices / market info
+_ro_client: PacificaClient | None = None
+
+
+async def _get_ro_client() -> PacificaClient:
+    """Get or create a shared read-only client (no signing needed)."""
+    global _ro_client
+    if _ro_client is None or (_ro_client._session and _ro_client._session.closed):
+        _ro_client = PacificaClient(account="public", keypair=Keypair())
+    return _ro_client
+
+
+async def _get_price(symbol: str) -> float:
+    """Fetch latest trade price for a symbol."""
+    client = await _get_ro_client()
+    trades = await client.get_trades(symbol, limit=1)
+    if trades:
+        return float(trades[0]["price"])
+    return 0.0
+
+
+async def _get_lot_size(symbol: str) -> str:
+    """Fetch lot size for a symbol from market info."""
+    client = await _get_ro_client()
+    markets = await client.get_markets_info()
+    m = next((x for x in markets if x.get("symbol") == symbol), None)
+    if m:
+        return str(m.get("lot_size", "0.01"))
+    return "0.01"
+
+
+def _token_to_usd(token_amount: float, price: float) -> float:
+    """Convert token amount to USD notional."""
+    return token_amount * price
+
+
+def _usd_to_token(usd_amount: float, price: float, lot_size: str) -> str:
+    """Convert USD amount to token amount, rounded down to lot size."""
+    if price <= 0:
+        return "0"
+    raw = usd_amount / price
+    lot = float(lot_size)
+    rounded = math.floor(raw / lot) * lot
+    if lot >= 1:
+        return str(int(rounded))
+    decimals = len(lot_size.split(".")[-1]) if "." in lot_size else 0
+    return f"{rounded:.{decimals}f}"
+
+
+def _round_to_lot(amount: float, lot_size: str) -> str:
+    """Round a token amount down to lot size."""
+    lot = float(lot_size)
+    rounded = math.floor(amount / lot) * lot
+    if lot >= 1:
+        return str(int(rounded))
+    decimals = len(lot_size.split(".")[-1]) if "." in lot_size else 0
+    return f"{rounded:.{decimals}f}"
 
 
 async def start_copy_engine(bot: Bot):
@@ -61,17 +125,14 @@ async def _poll_cycle(bot: Bot):
 
 
 async def _check_master(bot: Bot, master_wallet: str, followers: list[dict]):
-    # Fetch master's current positions (read-only, no signing needed)
-    temp_kp = Keypair()  # throwaway for GET
-    client = PacificaClient(account=master_wallet, keypair=temp_kp)
+    # Fetch master's current positions (read-only)
+    client = await _get_ro_client()
 
     try:
         positions = await client.get_positions(master_wallet)
     except PacificaAPIError:
         logger.warning("Could not fetch positions for master %s", master_wallet)
         return
-    finally:
-        await client.close()
 
     # Build current snapshot: {symbol: position}
     current: dict[str, dict] = {}
@@ -100,6 +161,64 @@ async def _check_master(bot: Bot, master_wallet: str, followers: list[dict]):
             await _replicate_close(bot, master_wallet, pos, followers)
 
 
+async def _calculate_copy_amount(
+    cfg: dict, symbol: str, master_size: float, price: float, lot_size: str,
+    user_client: PacificaClient,
+) -> str | None:
+    """Calculate the copy trade amount based on sizing mode.
+
+    Returns the token amount as a string, or None to skip this trade.
+    """
+    sizing_mode = cfg.get("sizing_mode", "fixed_usd")
+    max_usd = cfg.get("max_position_usd", 1000)
+    min_trade_usd = cfg.get("min_trade_usd", 0)
+
+    # Check minimum trade filter: skip if master's trade is too small
+    master_usd = _token_to_usd(master_size, price)
+    if min_trade_usd > 0 and master_usd < min_trade_usd:
+        return None
+
+    copy_usd = 0.0
+
+    if sizing_mode == "fixed_usd":
+        copy_usd = cfg.get("fixed_amount_usd", 10.0)
+
+    elif sizing_mode == "pct_equity":
+        pct = cfg.get("pct_equity", 5.0)
+        try:
+            account = user_client.account
+            info = await user_client.get_account_info(account)
+            equity = float(info.get("equity", 0))
+            copy_usd = equity * (pct / 100.0)
+        except Exception as e:
+            logger.warning("Could not fetch equity for %s: %s", cfg["telegram_id"], e)
+            return None
+
+    elif sizing_mode == "proportional":
+        multiplier = cfg.get("size_multiplier", 1.0)
+        copy_token = master_size * multiplier
+        copy_usd = _token_to_usd(copy_token, price)
+
+    else:
+        # Fallback to proportional
+        multiplier = cfg.get("size_multiplier", 1.0)
+        copy_token = master_size * multiplier
+        copy_usd = _token_to_usd(copy_token, price)
+
+    # Apply max position cap
+    if copy_usd > max_usd:
+        copy_usd = max_usd
+
+    # Convert USD to token amount
+    amount_str = _usd_to_token(copy_usd, price, lot_size)
+
+    # Skip if amount is zero or negligible
+    if float(amount_str) <= 0:
+        return None
+
+    return amount_str
+
+
 async def _replicate_open(
     bot: Bot, master_wallet: str, master_pos: dict, followers: list[dict]
 ):
@@ -107,16 +226,21 @@ async def _replicate_open(
     side = master_pos.get("side", "bid")
     master_size = abs(float(master_pos.get("amount", master_pos.get("size", 0))))
 
+    # Fetch price and lot size once for all followers
+    try:
+        price = await _get_price(symbol)
+        lot_size = await _get_lot_size(symbol)
+    except Exception:
+        price = 0.0
+        lot_size = "0.01"
+
+    if price <= 0:
+        logger.warning("Could not get price for %s, skipping copy", symbol)
+        return
+
     for cfg in followers:
         tg_id = cfg["telegram_id"]
-        multiplier = cfg["size_multiplier"]
-        max_usd = cfg["max_position_usd"]
-
-        # Calculate copy size
-        copy_size = master_size * multiplier
-
-        # TODO: convert to USD and cap at max_position_usd
-        # For now, just apply the multiplier
+        client = None
 
         try:
             user = await get_user(tg_id)
@@ -124,26 +248,39 @@ async def _replicate_open(
                 continue
 
             client = build_client_from_user(user)
-            resp = await client.create_market_order(
+
+            # Calculate copy amount based on sizing mode
+            amount = await _calculate_copy_amount(
+                cfg, symbol, master_size, price, lot_size, client,
+            )
+
+            if amount is None:
+                continue  # Skipped (min filter or zero amount)
+
+            await client.create_market_order(
                 symbol=symbol,
                 side=side,
-                amount=str(copy_size),
+                amount=amount,
             )
-            await client.close()
 
             await log_trade(
-                tg_id, symbol, side, str(copy_size),
+                tg_id, symbol, side, amount,
                 order_type="copy_open",
                 is_copy_trade=True,
                 master_wallet=master_wallet,
             )
 
             direction = "LONG" if side == "bid" else "SHORT"
+            copy_usd = float(amount) * price
+            sizing_mode = cfg.get("sizing_mode", "fixed_usd")
+            mode_label = sizing_mode.replace("_", " ").title()
+
             await bot.send_message(
                 tg_id,
-                f"<b>Copy Trade Executed</b>\n"
+                f"<b>Copy Trade Executed</b>\n\n"
                 f"Master: <code>{master_wallet[:8]}...</code>\n"
-                f"{symbol} {direction} {copy_size}\n",
+                f"{symbol} {direction} {amount} (~${copy_usd:,.0f})\n"
+                f"Mode: {mode_label}",
             )
         except Exception as e:
             logger.error("Copy open failed for user %s: %s", tg_id, e)
@@ -154,16 +291,19 @@ async def _replicate_open(
                 )
             except Exception:
                 pass
+        finally:
+            if client:
+                await client.close()
 
 
 async def _replicate_close(
     bot: Bot, master_wallet: str, master_pos: dict, followers: list[dict]
 ):
     symbol = master_pos.get("symbol", "?")
-    close_side = "ask" if master_pos.get("side") == "bid" else "bid"
 
     for cfg in followers:
         tg_id = cfg["telegram_id"]
+        client = None
 
         try:
             user = await get_user(tg_id)
@@ -179,19 +319,22 @@ async def _replicate_close(
                 None,
             )
             if not pos:
-                await client.close()
                 continue
 
-            amount = str(abs(float(pos.get("amount", pos.get("size", 0)))))
+            pos_size = abs(float(pos.get("amount", pos.get("size", 0))))
+            lot_size = await _get_lot_size(symbol)
+            amount = _round_to_lot(pos_size, lot_size)
             actual_close_side = "ask" if pos.get("side") == "bid" else "bid"
 
-            resp = await client.create_market_order(
+            if float(amount) <= 0:
+                continue
+
+            await client.create_market_order(
                 symbol=symbol,
                 side=actual_close_side,
                 amount=amount,
                 reduce_only=True,
             )
-            await client.close()
 
             await log_trade(
                 tg_id, symbol, actual_close_side, amount,
@@ -202,9 +345,12 @@ async def _replicate_close(
 
             await bot.send_message(
                 tg_id,
-                f"<b>Copy Trade — Position Closed</b>\n"
+                f"<b>Copy Trade — Position Closed</b>\n\n"
                 f"Master: <code>{master_wallet[:8]}...</code>\n"
-                f"{symbol} closed (size: {amount})\n",
+                f"{symbol} closed (size: {amount})",
             )
         except Exception as e:
             logger.error("Copy close failed for user %s: %s", tg_id, e)
+        finally:
+            if client:
+                await client.close()

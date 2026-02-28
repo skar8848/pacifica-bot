@@ -50,7 +50,11 @@ async def _init_tables(db: aiosqlite.Connection):
             telegram_id INTEGER REFERENCES users(telegram_id),
             master_wallet TEXT NOT NULL,
             active INTEGER DEFAULT 1,
+            sizing_mode TEXT DEFAULT 'fixed_usd',
             size_multiplier REAL DEFAULT 1.0,
+            fixed_amount_usd REAL DEFAULT 10.0,
+            pct_equity REAL DEFAULT 5.0,
+            min_trade_usd REAL DEFAULT 0,
             max_position_usd REAL DEFAULT 1000,
             symbols TEXT DEFAULT '*',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -94,11 +98,19 @@ async def _init_tables(db: aiosqlite.Connection):
         """
     )
     # Migrations for existing DBs
-    try:
-        await db.execute("ALTER TABLE users ADD COLUMN username TEXT")
-        await db.commit()
-    except Exception:
-        pass  # column already exists
+    migrations = [
+        "ALTER TABLE users ADD COLUMN username TEXT",
+        "ALTER TABLE copy_configs ADD COLUMN sizing_mode TEXT DEFAULT 'fixed_usd'",
+        "ALTER TABLE copy_configs ADD COLUMN fixed_amount_usd REAL DEFAULT 10.0",
+        "ALTER TABLE copy_configs ADD COLUMN pct_equity REAL DEFAULT 5.0",
+        "ALTER TABLE copy_configs ADD COLUMN min_trade_usd REAL DEFAULT 0",
+    ]
+    for sql in migrations:
+        try:
+            await db.execute(sql)
+            await db.commit()
+        except Exception:
+            pass  # column already exists
 
     await db.commit()
 
@@ -172,16 +184,22 @@ async def update_user(telegram_id: int, **fields):
 async def add_copy_config(
     telegram_id: int,
     master_wallet: str,
+    sizing_mode: str = "fixed_usd",
     size_multiplier: float = 1.0,
+    fixed_amount_usd: float = 10.0,
+    pct_equity: float = 5.0,
+    min_trade_usd: float = 0,
     max_position_usd: float = 1000,
     symbols: str = "*",
 ) -> int:
     db = await get_db()
     cursor = await db.execute(
         """INSERT INTO copy_configs
-           (telegram_id, master_wallet, size_multiplier, max_position_usd, symbols)
-           VALUES (?, ?, ?, ?, ?)""",
-        (telegram_id, master_wallet, size_multiplier, max_position_usd, symbols),
+           (telegram_id, master_wallet, sizing_mode, size_multiplier,
+            fixed_amount_usd, pct_equity, min_trade_usd, max_position_usd, symbols)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (telegram_id, master_wallet, sizing_mode, size_multiplier,
+         fixed_amount_usd, pct_equity, min_trade_usd, max_position_usd, symbols),
     )
     await db.commit()
     return cursor.lastrowid  # type: ignore
