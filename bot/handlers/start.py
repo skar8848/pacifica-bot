@@ -12,7 +12,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
 from database.db import (
-    get_user, create_user, update_user,
+    get_user, create_user, update_user, get_user_by_wallet,
     get_or_create_ref_code, get_user_by_ref_code, count_referrals,
     get_user_settings, set_user_setting,
     get_active_alerts, add_price_alert, delete_alert,
@@ -234,6 +234,19 @@ async def msg_import_key(message: Message, state: FSMContext):
         return
 
     tg_id = message.from_user.id  # type: ignore
+
+    # Check if wallet is already used by another user
+    existing = await get_user_by_wallet(pub, exclude_tg_id=tg_id)
+    if existing:
+        other_name = existing.get("username") or f"user #{existing['telegram_id']}"
+        await message.answer(
+            f"This wallet is already linked to <b>{other_name}</b>.\n\n"
+            f"Each wallet can only be used by one account.\n"
+            f"Generate a new wallet or use a different key.",
+            reply_markup=onboarding_kb(),
+        )
+        return
+
     await _finish_wallet_setup(tg_id, pub, enc, state)
 
     from bot.utils.keyboards import wallet_kb

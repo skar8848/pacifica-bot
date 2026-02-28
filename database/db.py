@@ -140,6 +140,23 @@ async def delete_user(telegram_id: int):
     await db.commit()
 
 
+async def get_user_by_wallet(wallet: str, exclude_tg_id: int | None = None) -> dict | None:
+    """Check if a wallet is already registered to another user."""
+    db = await get_db()
+    if exclude_tg_id:
+        async with db.execute(
+            "SELECT * FROM users WHERE pacifica_account = ? AND telegram_id != ?",
+            (wallet, exclude_tg_id),
+        ) as cursor:
+            row = await cursor.fetchone()
+            return dict(row) if row else None
+    async with db.execute(
+        "SELECT * FROM users WHERE pacifica_account = ?", (wallet,)
+    ) as cursor:
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+
 async def update_user(telegram_id: int, **fields):
     db = await get_db()
     sets = ", ".join(f"{k} = ?" for k in fields)
