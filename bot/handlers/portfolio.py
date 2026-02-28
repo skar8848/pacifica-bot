@@ -35,13 +35,14 @@ async def cmd_positions(message: Message):
     if not user:
         return
 
+    client = build_client_from_user(user)
     try:
-        client = build_client_from_user(user)
         positions = await client.get_positions()
-        await client.close()
     except Exception as e:
         await message.answer(f"Error: {e}", reply_markup=back_to_menu_kb())
         return
+    finally:
+        await client.close()
 
     if not positions:
         text = "<b>📈 Positions</b>\n\nNo open positions."
@@ -59,13 +60,14 @@ async def cmd_orders(message: Message):
     if not user:
         return
 
+    client = build_client_from_user(user)
     try:
-        client = build_client_from_user(user)
         orders = await client.get_open_orders()
-        await client.close()
     except Exception as e:
         await message.answer(f"Error: {e}", reply_markup=back_to_menu_kb())
         return
+    finally:
+        await client.close()
 
     if not orders:
         text = "<b>📋 Orders</b>\n\nNo open orders."
@@ -83,13 +85,14 @@ async def cmd_balance(message: Message):
     if not user:
         return
 
+    client = build_client_from_user(user)
     try:
-        client = build_client_from_user(user)
         info = await client.get_account_info()
-        await client.close()
     except Exception as e:
         await message.answer(f"Error: {e}", reply_markup=back_to_menu_kb())
         return
+    finally:
+        await client.close()
 
     await message.answer(fmt_balance(info), reply_markup=main_menu_kb())
 
@@ -100,13 +103,14 @@ async def cmd_pnl(message: Message):
     if not user:
         return
 
+    client = build_client_from_user(user)
     try:
-        client = build_client_from_user(user)
         trades = await client.get_trades_history()
-        await client.close()
     except Exception as e:
         await message.answer(f"Error: {e}", reply_markup=back_to_menu_kb())
         return
+    finally:
+        await client.close()
 
     await message.answer(fmt_pnl(trades), reply_markup=main_menu_kb())
 
@@ -132,10 +136,11 @@ async def cmd_history(message: Message):
 @router.message(Command("prices"))
 async def cmd_prices(message: Message):
     """Quick price overview for top assets."""
+    from bot.services.pacifica_client import PacificaClient
+    from solders.keypair import Keypair
+
+    client = PacificaClient(account="public", keypair=Keypair())
     try:
-        from bot.services.pacifica_client import PacificaClient
-        from solders.keypair import Keypair
-        client = PacificaClient(account="public", keypair=Keypair())
         markets = await client.get_markets_info()
 
         top_symbols = ["BTC", "ETH", "SOL", "TRUMP", "HYPE", "DOGE", "XRP", "SUI", "LINK", "AVAX"]
@@ -154,10 +159,11 @@ async def cmd_prices(message: Message):
             except Exception:
                 pass
 
-        await client.close()
         text = "\n".join(lines) if len(lines) > 1 else "Could not fetch prices."
     except Exception as e:
         text = f"Error: {e}"
+    finally:
+        await client.close()
 
     await message.answer(text, reply_markup=main_menu_kb())
 
@@ -170,8 +176,8 @@ async def cmd_wallet(message: Message):
         return
 
     import asyncio
-    from bot.services.solana_client import get_sol_balance, get_usdc_balance, is_devnet
     from bot.services.pacifica_client import PacificaAPIError
+    from bot.services.solana_client import get_sol_balance, get_usdc_balance
     from bot.utils.keyboards import wallet_kb
     from bot.config import PACIFICA_NETWORK
 
@@ -190,20 +196,19 @@ async def cmd_wallet(message: Message):
     except Exception:
         pass
 
+    client = build_client_from_user(user)
     try:
-        client = build_client_from_user(user)
-        try:
-            info = await client.get_account_info()
-            pac_bal = f"${info.get('balance', '0')}"
-        except PacificaAPIError as e:
-            if "not found" in str(e).lower():
-                pac_bal = "$0 (not deposited)"
-            else:
-                pac_bal = "Error"
-        finally:
-            await client.close()
+        info = await client.get_account_info()
+        pac_bal = f"${info.get('balance', '0')}"
+    except PacificaAPIError as e:
+        if "not found" in str(e).lower():
+            pac_bal = "$0 (not deposited)"
+        else:
+            pac_bal = "Error"
     except Exception:
         pac_bal = "—"
+    finally:
+        await client.close()
 
     text = (
         f"<b>Wallet</b>\n\n"
