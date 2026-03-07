@@ -105,6 +105,121 @@ async def _init_tables(db: aiosqlite.Connection):
             uses INTEGER DEFAULT 0,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
+
+        CREATE TABLE IF NOT EXISTS trailing_stops (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            telegram_id INTEGER REFERENCES users(telegram_id),
+            symbol TEXT NOT NULL,
+            side TEXT NOT NULL,
+            trail_percent REAL NOT NULL,
+            entry_price REAL NOT NULL,
+            peak_price REAL NOT NULL,
+            callback_price REAL NOT NULL,
+            active INTEGER DEFAULT 1,
+            triggered_at TIMESTAMP,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS dca_configs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            telegram_id INTEGER REFERENCES users(telegram_id),
+            symbol TEXT NOT NULL,
+            side TEXT NOT NULL,
+            mode TEXT NOT NULL,                   -- 'time' or 'price'
+            total_amount_usd REAL NOT NULL,
+            amount_per_order REAL NOT NULL,
+            leverage INTEGER DEFAULT 1,
+            interval_seconds INTEGER,             -- for time-based
+            price_levels TEXT,                    -- JSON array for price-based
+            orders_executed INTEGER DEFAULT 0,
+            orders_total INTEGER NOT NULL,
+            avg_entry REAL DEFAULT 0,
+            active INTEGER DEFAULT 1,
+            next_execution TIMESTAMP,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS scaled_orders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            telegram_id INTEGER REFERENCES users(telegram_id),
+            symbol TEXT NOT NULL,
+            side TEXT NOT NULL,
+            total_amount_usd REAL NOT NULL,
+            price_low REAL NOT NULL,
+            price_high REAL NOT NULL,
+            num_levels INTEGER NOT NULL,
+            distribution TEXT DEFAULT 'even',
+            leverage INTEGER DEFAULT 1,
+            orders_placed INTEGER DEFAULT 0,
+            active INTEGER DEFAULT 1,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS leader_profiles (
+            telegram_id INTEGER PRIMARY KEY REFERENCES users(telegram_id),
+            display_name TEXT NOT NULL,
+            bio TEXT DEFAULT '',
+            profit_share_pct REAL DEFAULT 10.0,
+            is_public INTEGER DEFAULT 1,
+            total_followers INTEGER DEFAULT 0,
+            total_pnl_shared REAL DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS follower_pnl (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            follower_id INTEGER NOT NULL REFERENCES users(telegram_id),
+            leader_id INTEGER NOT NULL,
+            symbol TEXT NOT NULL,
+            side TEXT NOT NULL,
+            entry_price REAL NOT NULL,
+            exit_price REAL,
+            amount REAL NOT NULL,
+            realized_pnl REAL DEFAULT 0,
+            profit_shared REAL DEFAULT 0,
+            status TEXT DEFAULT 'open',
+            opened_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            closed_at TIMESTAMP
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_follower_pnl_leader
+            ON follower_pnl(leader_id);
+        CREATE INDEX IF NOT EXISTS idx_follower_pnl_follower
+            ON follower_pnl(follower_id, status);
+
+        CREATE TABLE IF NOT EXISTS twap_orders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            telegram_id INTEGER REFERENCES users(telegram_id),
+            symbol TEXT NOT NULL,
+            side TEXT NOT NULL,
+            total_amount_usd REAL NOT NULL,
+            num_slices INTEGER NOT NULL,
+            interval_seconds INTEGER NOT NULL,
+            leverage INTEGER DEFAULT 1,
+            slices_executed INTEGER DEFAULT 0,
+            amount_per_slice REAL NOT NULL,
+            avg_price REAL DEFAULT 0,
+            randomize INTEGER DEFAULT 0,
+            active INTEGER DEFAULT 1,
+            next_execution TIMESTAMP,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS onchain_watches (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            telegram_id INTEGER NOT NULL,
+            wallet_address TEXT NOT NULL,
+            label TEXT,
+            min_tx_usd REAL DEFAULT 10000,
+            active INTEGER DEFAULT 1,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(telegram_id, wallet_address)
+        );
+
+        CREATE TABLE IF NOT EXISTS bot_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        );
         """
     )
     # Migrations for existing DBs
@@ -542,3 +657,399 @@ async def get_all_beta_codes() -> list[dict]:
         "SELECT * FROM beta_codes ORDER BY created_at DESC"
     ) as cursor:
         return [dict(r) for r in await cursor.fetchall()]
+
+
+# ------------------------------------------------------------------
+# Trailing stops
+# ------------------------------------------------------------------
+
+async def add_trailing_stop(
+    telegram_id: int, symbol: str, side: str, trail_percent: float,
+    entry_price: float, peak_price: float, callback_price: float,
+) -> int:
+    db = await get_db()
+    cursor = await db.execute(
+        """INSERT INTO trailing_stops
+           (telegram_id, symbol, side, trail_percent, entry_price, peak_price, callback_price)
+           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        (telegram_id, symbol, side, trail_percent, entry_price, peak_price, callback_price),
+    )
+    await db.commit()
+    return cursor.lastrowid  # type: ignore
+
+
+async def get_active_trailing_stops(telegram_id: int | None = None) -> list[dict]:
+    db = await get_db()
+    if telegram_id:
+        q = "SELECT * FROM trailing_stops WHERE telegram_id = ? AND active = 1"
+        params = (telegram_id,)
+    else:
+        q = "SELECT * FROM trailing_stops WHERE active = 1"
+        params = ()
+    async with db.execute(q, params) as cursor:
+        return [dict(r) for r in await cursor.fetchall()]
+
+
+async def cancel_trailing_stop(stop_id: int, telegram_id: int):
+    db = await get_db()
+    await db.execute(
+        "UPDATE trailing_stops SET active = 0 WHERE id = ? AND telegram_id = ?",
+        (stop_id, telegram_id),
+    )
+    await db.commit()
+
+
+# ------------------------------------------------------------------
+# DCA configs
+# ------------------------------------------------------------------
+
+async def add_dca_config(
+    telegram_id: int, symbol: str, side: str, mode: str,
+    total_amount_usd: float, amount_per_order: float, orders_total: int,
+    leverage: int = 1, interval_seconds: int | None = None,
+    price_levels: str | None = None,
+) -> int:
+    db = await get_db()
+    cursor = await db.execute(
+        """INSERT INTO dca_configs
+           (telegram_id, symbol, side, mode, total_amount_usd, amount_per_order,
+            orders_total, leverage, interval_seconds, price_levels, next_execution)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))""",
+        (telegram_id, symbol, side, mode, total_amount_usd, amount_per_order,
+         orders_total, leverage, interval_seconds, price_levels),
+    )
+    await db.commit()
+    return cursor.lastrowid  # type: ignore
+
+
+async def get_active_dca_configs(telegram_id: int | None = None) -> list[dict]:
+    db = await get_db()
+    if telegram_id:
+        q = "SELECT * FROM dca_configs WHERE telegram_id = ? AND active = 1"
+        params = (telegram_id,)
+    else:
+        q = "SELECT * FROM dca_configs WHERE active = 1"
+        params = ()
+    async with db.execute(q, params) as cursor:
+        return [dict(r) for r in await cursor.fetchall()]
+
+
+async def update_dca_progress(dca_id: int, orders_executed: int, avg_entry: float, next_execution: str | None = None):
+    db = await get_db()
+    if next_execution:
+        await db.execute(
+            "UPDATE dca_configs SET orders_executed = ?, avg_entry = ?, next_execution = ? WHERE id = ?",
+            (orders_executed, avg_entry, next_execution, dca_id),
+        )
+    else:
+        await db.execute(
+            "UPDATE dca_configs SET orders_executed = ?, avg_entry = ?, active = 0 WHERE id = ?",
+            (orders_executed, avg_entry, dca_id),
+        )
+    await db.commit()
+
+
+async def cancel_dca(dca_id: int, telegram_id: int):
+    db = await get_db()
+    await db.execute(
+        "UPDATE dca_configs SET active = 0 WHERE id = ? AND telegram_id = ?",
+        (dca_id, telegram_id),
+    )
+    await db.commit()
+
+
+# ------------------------------------------------------------------
+# Scaled orders
+# ------------------------------------------------------------------
+
+async def add_scaled_order(
+    telegram_id: int, symbol: str, side: str, total_amount_usd: float,
+    price_low: float, price_high: float, num_levels: int,
+    distribution: str = "even", leverage: int = 1,
+) -> int:
+    db = await get_db()
+    cursor = await db.execute(
+        """INSERT INTO scaled_orders
+           (telegram_id, symbol, side, total_amount_usd, price_low, price_high,
+            num_levels, distribution, leverage)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (telegram_id, symbol, side, total_amount_usd, price_low, price_high,
+         num_levels, distribution, leverage),
+    )
+    await db.commit()
+    return cursor.lastrowid  # type: ignore
+
+
+# ------------------------------------------------------------------
+# Leader profiles (Copy Trading v2)
+# ------------------------------------------------------------------
+
+async def create_leader_profile(
+    telegram_id: int, display_name: str, bio: str = "",
+    profit_share_pct: float = 10.0,
+) -> dict:
+    db = await get_db()
+    await db.execute(
+        """INSERT INTO leader_profiles (telegram_id, display_name, bio, profit_share_pct)
+           VALUES (?, ?, ?, ?)
+           ON CONFLICT(telegram_id) DO UPDATE SET
+             display_name = ?, bio = ?, profit_share_pct = ?, is_public = 1""",
+        (telegram_id, display_name, bio, profit_share_pct,
+         display_name, bio, profit_share_pct),
+    )
+    await db.commit()
+    return (await get_leader_profile(telegram_id))  # type: ignore
+
+
+async def get_leader_profile(telegram_id: int) -> dict | None:
+    db = await get_db()
+    async with db.execute(
+        "SELECT * FROM leader_profiles WHERE telegram_id = ?", (telegram_id,)
+    ) as cursor:
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+
+async def get_public_leaders() -> list[dict]:
+    db = await get_db()
+    async with db.execute(
+        """SELECT lp.*, u.pacifica_account, u.username
+           FROM leader_profiles lp
+           JOIN users u ON lp.telegram_id = u.telegram_id
+           WHERE lp.is_public = 1
+           ORDER BY lp.total_followers DESC"""
+    ) as cursor:
+        return [dict(r) for r in await cursor.fetchall()]
+
+
+async def update_leader_followers(leader_id: int, delta: int):
+    db = await get_db()
+    await db.execute(
+        "UPDATE leader_profiles SET total_followers = MAX(0, total_followers + ?) WHERE telegram_id = ?",
+        (delta, leader_id),
+    )
+    await db.commit()
+
+
+async def deactivate_leader(telegram_id: int):
+    db = await get_db()
+    await db.execute(
+        "UPDATE leader_profiles SET is_public = 0 WHERE telegram_id = ?",
+        (telegram_id,),
+    )
+    await db.commit()
+
+
+# ------------------------------------------------------------------
+# Follower PnL tracking
+# ------------------------------------------------------------------
+
+async def open_follower_position(
+    follower_id: int, leader_id: int, symbol: str, side: str,
+    entry_price: float, amount: float,
+) -> int:
+    db = await get_db()
+    cursor = await db.execute(
+        """INSERT INTO follower_pnl
+           (follower_id, leader_id, symbol, side, entry_price, amount)
+           VALUES (?, ?, ?, ?, ?, ?)""",
+        (follower_id, leader_id, symbol, side, entry_price, amount),
+    )
+    await db.commit()
+    return cursor.lastrowid  # type: ignore
+
+
+async def close_follower_position(
+    follower_id: int, leader_id: int, symbol: str, exit_price: float,
+) -> dict | None:
+    """Close a follower's tracked position and calculate PnL + profit share."""
+    db = await get_db()
+    async with db.execute(
+        """SELECT * FROM follower_pnl
+           WHERE follower_id = ? AND leader_id = ? AND symbol = ? AND status = 'open'
+           ORDER BY opened_at DESC LIMIT 1""",
+        (follower_id, leader_id, symbol),
+    ) as cursor:
+        row = await cursor.fetchone()
+        if not row:
+            return None
+        pos = dict(row)
+
+    amount = pos["amount"]
+    entry = pos["entry_price"]
+    if pos["side"].lower() in ("long", "bid", "buy"):
+        pnl = (exit_price - entry) * amount
+    else:
+        pnl = (entry - exit_price) * amount
+
+    # Calculate profit share (only on profits)
+    profit_share = 0.0
+    if pnl > 0:
+        leader = await get_leader_profile(leader_id)
+        share_pct = leader.get("profit_share_pct", 10.0) if leader else 10.0
+        profit_share = pnl * (share_pct / 100.0)
+
+    await db.execute(
+        """UPDATE follower_pnl
+           SET exit_price = ?, realized_pnl = ?, profit_shared = ?,
+               status = 'closed', closed_at = CURRENT_TIMESTAMP
+           WHERE id = ?""",
+        (exit_price, pnl, profit_share, pos["id"]),
+    )
+
+    # Update leader's total shared
+    if profit_share > 0:
+        await db.execute(
+            "UPDATE leader_profiles SET total_pnl_shared = total_pnl_shared + ? WHERE telegram_id = ?",
+            (profit_share, leader_id),
+        )
+
+    await db.commit()
+    return {"pnl": pnl, "profit_share": profit_share, "entry": entry, "exit": exit_price, "amount": amount}
+
+
+async def get_leader_performance(leader_id: int) -> dict:
+    """Get aggregated performance stats for a leader."""
+    db = await get_db()
+    async with db.execute(
+        """SELECT
+             COUNT(*) as total_trades,
+             SUM(CASE WHEN realized_pnl > 0 THEN 1 ELSE 0 END) as wins,
+             SUM(realized_pnl) as total_pnl,
+             SUM(profit_shared) as total_shared
+           FROM follower_pnl WHERE leader_id = ? AND status = 'closed'""",
+        (leader_id,),
+    ) as cursor:
+        row = await cursor.fetchone()
+        if not row or not row[0]:
+            return {"total_trades": 0, "wins": 0, "total_pnl": 0, "total_shared": 0, "win_rate": 0}
+        total = row[0]
+        wins = row[1] or 0
+        return {
+            "total_trades": total,
+            "wins": wins,
+            "total_pnl": row[2] or 0,
+            "total_shared": row[3] or 0,
+            "win_rate": (wins / total * 100) if total > 0 else 0,
+        }
+
+
+# ------------------------------------------------------------------
+# TWAP orders
+# ------------------------------------------------------------------
+
+async def add_twap_order(
+    telegram_id: int, symbol: str, side: str, total_amount_usd: float,
+    num_slices: int, interval_seconds: int, amount_per_slice: float,
+    leverage: int = 1, randomize: bool = False,
+) -> int:
+    db = await get_db()
+    cursor = await db.execute(
+        """INSERT INTO twap_orders
+           (telegram_id, symbol, side, total_amount_usd, num_slices,
+            interval_seconds, amount_per_slice, leverage, randomize,
+            next_execution)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))""",
+        (telegram_id, symbol, side, total_amount_usd, num_slices,
+         interval_seconds, amount_per_slice, leverage, int(randomize)),
+    )
+    await db.commit()
+    return cursor.lastrowid  # type: ignore
+
+
+async def get_active_twap_orders(telegram_id: int | None = None) -> list[dict]:
+    db = await get_db()
+    if telegram_id:
+        q = "SELECT * FROM twap_orders WHERE telegram_id = ? AND active = 1"
+        params = (telegram_id,)
+    else:
+        q = "SELECT * FROM twap_orders WHERE active = 1"
+        params = ()
+    async with db.execute(q, params) as cursor:
+        return [dict(r) for r in await cursor.fetchall()]
+
+
+async def update_twap_progress(
+    twap_id: int, slices_executed: int, avg_price: float,
+    next_execution: str | None = None,
+):
+    db = await get_db()
+    if next_execution:
+        await db.execute(
+            """UPDATE twap_orders
+               SET slices_executed = ?, avg_price = ?, next_execution = ?
+               WHERE id = ?""",
+            (slices_executed, avg_price, next_execution, twap_id),
+        )
+    else:
+        await db.execute(
+            """UPDATE twap_orders
+               SET slices_executed = ?, avg_price = ?, active = 0
+               WHERE id = ?""",
+            (slices_executed, avg_price, twap_id),
+        )
+    await db.commit()
+
+
+async def cancel_twap(twap_id: int, telegram_id: int):
+    db = await get_db()
+    await db.execute(
+        "UPDATE twap_orders SET active = 0 WHERE id = ? AND telegram_id = ?",
+        (twap_id, telegram_id),
+    )
+    await db.commit()
+
+
+# ------------------------------------------------------------------
+# On-chain watches
+# ------------------------------------------------------------------
+
+async def add_onchain_watch(
+    telegram_id: int, wallet_address: str, label: str | None = None,
+    min_tx_usd: float = 10000,
+) -> bool:
+    db = await get_db()
+    try:
+        await db.execute(
+            """INSERT INTO onchain_watches (telegram_id, wallet_address, label, min_tx_usd)
+               VALUES (?, ?, ?, ?)""",
+            (telegram_id, wallet_address, label, min_tx_usd),
+        )
+        await db.commit()
+        return True
+    except Exception:
+        return False
+
+
+async def remove_onchain_watch(telegram_id: int, wallet_address: str) -> bool:
+    db = await get_db()
+    cursor = await db.execute(
+        "DELETE FROM onchain_watches WHERE telegram_id = ? AND wallet_address = ?",
+        (telegram_id, wallet_address),
+    )
+    await db.commit()
+    return cursor.rowcount > 0
+
+
+async def get_onchain_watches(telegram_id: int | None = None) -> list[dict]:
+    db = await get_db()
+    if telegram_id:
+        q = "SELECT * FROM onchain_watches WHERE telegram_id = ? AND active = 1"
+        params = (telegram_id,)
+    else:
+        q = "SELECT * FROM onchain_watches WHERE active = 1"
+        params = ()
+    async with db.execute(q, params) as cursor:
+        return [dict(r) for r in await cursor.fetchall()]
+
+
+async def get_all_onchain_addresses() -> dict[str, list[tuple[int, float]]]:
+    """Returns {wallet_address: [(telegram_id, min_tx_usd), ...]}."""
+    db = await get_db()
+    result: dict[str, list[tuple[int, float]]] = {}
+    async with db.execute(
+        "SELECT wallet_address, telegram_id, min_tx_usd FROM onchain_watches WHERE active = 1"
+    ) as cursor:
+        async for row in cursor:
+            result.setdefault(row[0], []).append((row[1], row[2]))
+    return result

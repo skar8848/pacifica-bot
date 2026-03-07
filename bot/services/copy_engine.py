@@ -19,13 +19,44 @@ from bot.models.user import build_client_from_user
 from database.db import (
     get_active_copy_configs,
     get_user,
+    get_user_by_wallet,
     log_trade,
+    open_follower_position,
+    close_follower_position,
+    get_leader_profile,
 )
 
 logger = logging.getLogger(__name__)
 
 _running = False
 _master_snapshots: dict[str, dict[str, dict]] = {}
+_leader_wallet_cache: dict[str, int | None] = {}
+
+
+_user_by_wallet_cache: dict[str, dict | None] = {}
+
+
+async def _get_user_by_wallet_cached(wallet: str) -> dict | None:
+    """Get user by wallet with caching."""
+    if wallet in _user_by_wallet_cache:
+        return _user_by_wallet_cache[wallet]
+    user = await get_user_by_wallet(wallet)
+    _user_by_wallet_cache[wallet] = user
+    return user
+
+
+async def _find_leader_by_wallet(wallet: str) -> int | None:
+    """Check if a master wallet belongs to a registered leader. Cached."""
+    if wallet in _leader_wallet_cache:
+        return _leader_wallet_cache[wallet]
+    user = await _get_user_by_wallet_cached(wallet)
+    if user:
+        profile = await get_leader_profile(user["telegram_id"])
+        if profile:
+            _leader_wallet_cache[wallet] = user["telegram_id"]
+            return user["telegram_id"]
+    _leader_wallet_cache[wallet] = None
+    return None
 
 
 async def start_copy_engine(bot: Bot):
@@ -171,6 +202,15 @@ async def _replicate_open(
         logger.warning("Could not get price for %s, skipping copy", symbol)
         return
 
+    # Post leader trade to group feed (once per master open, not per follower)
+    master_user_data = await _get_user_by_wallet_cached(master_wallet)
+    if master_user_data and master_user_data.get("username"):
+        master_usd = token_to_usd(master_size, price)
+        from bot.services.group_feed import post_leader_trade
+        await post_leader_trade(
+            bot, master_user_data["username"], symbol, side, master_usd,
+        )
+
     for cfg in followers:
         tg_id = cfg["telegram_id"]
         client = None
@@ -193,14 +233,32 @@ async def _replicate_open(
                 order_type="copy_open", is_copy_trade=True, master_wallet=master_wallet,
             )
 
+            # Track follower PnL for leader profit sharing
+            leader_user = await _find_leader_by_wallet(master_wallet)
+            if leader_user:
+                side_label = "long" if side == "bid" else "short"
+                await open_follower_position(
+                    follower_id=tg_id,
+                    leader_id=leader_user,
+                    symbol=symbol,
+                    side=side_label,
+                    entry_price=price,
+                    amount=float(amount),
+                )
+
             direction = "LONG" if side == "bid" else "SHORT"
             copy_usd = float(amount) * price
             mode_label = cfg.get("sizing_mode", "fixed_usd").replace("_", " ").title()
 
+            # Show username if leader, otherwise wallet snippet
+            master_label = f"<code>{master_wallet[:8]}...</code>"
+            if master_user_data and master_user_data.get("username"):
+                master_label = f"@{master_user_data['username']}"
+
             await bot.send_message(
                 tg_id,
                 f"<b>Copy Trade Executed</b>\n\n"
-                f"Master: <code>{master_wallet[:8]}...</code>\n"
+                f"Master: {master_label}\n"
                 f"{symbol} {direction} {amount} (~${copy_usd:,.0f})\n"
                 f"Mode: {mode_label}",
             )
@@ -254,11 +312,52 @@ async def _replicate_close(
                 order_type="copy_close", is_copy_trade=True, master_wallet=master_wallet,
             )
 
+            # Close follower PnL tracking & calculate profit share
+            leader_user = await _find_leader_by_wallet(master_wallet)
+            pnl_info = None
+            if leader_user:
+                exit_price = await get_price(symbol) or 0
+                if exit_price:
+                    pnl_info = await close_follower_position(
+                        follower_id=tg_id,
+                        leader_id=leader_user,
+                        symbol=symbol,
+                        exit_price=exit_price,
+                    )
+
+            pnl_str = ""
+            if pnl_info:
+                pnl = pnl_info["pnl"]
+                share = pnl_info["profit_share"]
+                emoji = "+" if pnl >= 0 else ""
+                pnl_str = f"\nPnL: <code>{emoji}${pnl:,.2f}</code>"
+                if share > 0:
+                    pnl_str += f"\nLeader fee: <code>${share:,.2f}</code>"
+
+                # Post leader PnL to group feed
+                master_user_data_close = await _get_user_by_wallet_cached(master_wallet)
+                if master_user_data_close and master_user_data_close.get("username"):
+                    entry = pnl_info["entry"]
+                    exit_p = pnl_info["exit"]
+                    pnl_pct = ((exit_p - entry) / entry * 100) if entry else 0
+                    side_raw = master_pos.get("side", "bid")
+                    if abs(pnl) >= 10:
+                        from bot.services.group_feed import post_leader_pnl
+                        await post_leader_pnl(
+                            bot, master_user_data_close["username"],
+                            symbol, side_raw, pnl, pnl_pct,
+                        )
+
+            master_label = f"<code>{master_wallet[:8]}...</code>"
+            master_user_data = await _get_user_by_wallet_cached(master_wallet)
+            if master_user_data and master_user_data.get("username"):
+                master_label = f"@{master_user_data['username']}"
+
             await bot.send_message(
                 tg_id,
                 f"<b>Copy Trade — Position Closed</b>\n\n"
-                f"Master: <code>{master_wallet[:8]}...</code>\n"
-                f"{symbol} closed (size: {amount})",
+                f"Master: {master_label}\n"
+                f"{symbol} closed (size: {amount}){pnl_str}",
             )
         except Exception as e:
             logger.error("Copy close failed for user %s: %s", tg_id, e)

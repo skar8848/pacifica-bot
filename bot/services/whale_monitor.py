@@ -232,6 +232,14 @@ async def _snapshot_and_alert(bot: Bot):
                 except Exception as e:
                     logger.debug("Failed to send whale alert to %s: %s", tg_id, e)
 
+        # Post to group feed
+        if equity >= MIN_EQUITY_FOR_WHALE:
+            from bot.services.group_feed import post_whale_alert
+            await post_whale_alert(
+                bot, addr, oi_change, equity, pnl_all,
+                username=username if username != f"{addr[:6]}...{addr[-4:]}" else None,
+            )
+
         # Send to users tracking this specific wallet
         if addr in tracked:
             tracked_alert = (

@@ -61,6 +61,9 @@ DISPENSER_PRIVATE_KEY = os.getenv("DISPENSER_PRIVATE_KEY", "")
 DISPENSER_SOL_AMOUNT = 0.02  # SOL sent to each new wallet
 DISPENSER_USDC_AMOUNT = 3_000  # USDC sent to each new wallet (devnet)
 
+# --- Alert Group ---
+ALERT_GROUP_ID = int(os.getenv("ALERT_GROUP_ID", "0")) or None
+
 # --- Defaults ---
 DEFAULT_SLIPPAGE = "0.5"
 DEFAULT_EXPIRY_WINDOW = 5_000

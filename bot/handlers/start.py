@@ -59,6 +59,10 @@ class AlertStates(StatesGroup):
     waiting_price = State()
 
 
+class OnboardUsernameStates(StatesGroup):
+    waiting_username = State()
+
+
 class ReferralStates(StatesGroup):
     waiting_username = State()
 
@@ -83,6 +87,17 @@ async def cmd_start(message: Message, state: FSMContext):
         await state.update_data(ref_code=ref_code)
 
     if user and user.get("pacifica_account"):
+        # Existing user without username — prompt to set one
+        if not user.get("username"):
+            await state.set_state(OnboardUsernameStates.waiting_username)
+            await message.answer(
+                f"<b>Welcome back!</b>\n\n"
+                f"You need to set a username to continue.\n"
+                f"Choose a unique name (3-15 chars, letters/numbers/underscore).\n\n"
+                f"This is your identity on Trident — used for referrals, leaderboards, and PnL cards.",
+            )
+            return
+
         wallet = user["pacifica_account"]
         display_name = user.get("username") or message.from_user.first_name or "trader"
         # Quick account summary
@@ -160,7 +175,10 @@ async def cmd_import(message: Message, state: FSMContext):
 
 
 async def _finish_wallet_setup(tg_id: int, pub: str, enc: str, state: FSMContext):
-    """Common logic after wallet import/generate: save, track referral, dispense SOL, auto-claim."""
+    """Common logic after wallet import/generate: save, track referral, dispense SOL, auto-claim.
+
+    Does NOT clear FSM state — caller transitions to username prompt.
+    """
     user = await get_user(tg_id)
     if user:
         await update_user(tg_id, pacifica_account=pub, agent_wallet_public=None, agent_wallet_encrypted=enc)
@@ -183,7 +201,8 @@ async def _finish_wallet_setup(tg_id: int, pub: str, enc: str, state: FSMContext
     # Auto-setup: claim beta code + approve builder code (background)
     asyncio.create_task(_auto_claim_setup(tg_id))
 
-    await state.clear()
+    # Transition to username prompt (mandatory)
+    await state.set_state(OnboardUsernameStates.waiting_username)
 
 
 async def _auto_dispense_sol(wallet_pubkey: str):
@@ -299,13 +318,12 @@ async def msg_import_key(message: Message, state: FSMContext):
 
     await _finish_wallet_setup(tg_id, pub, enc, state)
 
-    from bot.utils.keyboards import wallet_kb
     await message.answer(
         f"<b>Wallet Imported!</b>\n\n"
         f"Address: <code>{pub}</code>\n\n"
         f"Your private key has been deleted from chat.\n\n"
-        f"<b>Next:</b> Open your Wallet to get USDC and deposit.",
-        reply_markup=wallet_kb(0, 0),
+        f"<b>Now choose your username</b> (3-15 chars, letters/numbers/underscore).\n"
+        f"This is your identity on Trident — used for referrals, leaderboards, and PnL cards.",
     )
 
 
@@ -325,21 +343,113 @@ async def onboard_generate(callback: CallbackQuery, state: FSMContext):
     pub, enc = generate_wallet()
     await _finish_wallet_setup(tg_id, pub, enc, state)
 
-    from bot.utils.keyboards import wallet_kb
-    if PACIFICA_NETWORK == "mainnet":
-        next_step = "<b>Next:</b> Send SOL to your wallet address above, then deposit USDC on Pacifica to start trading."
-    else:
-        next_step = (
-            "⏳ <b>Please wait ~10 seconds</b> — your wallet is being set up.\n"
-            "SOL + USDC are being sent automatically.\n\n"
-            "Once ready, open your <b>Wallet</b> to check balances and start trading."
-        )
     await callback.message.edit_text(  # type: ignore
         f"<b>Wallet Generated!</b>\n\n"
         f"Address:\n<code>{pub}</code>\n\n"
         f"Your private key is stored encrypted.\n\n"
-        f"{next_step}",
-        reply_markup=wallet_kb(0, 0),
+        f"<b>Now choose your username</b> (3-15 chars, letters/numbers/underscore).\n"
+        f"This is your identity on Trident — used for referrals, leaderboards, and PnL cards.",
+    )
+
+
+# ------------------------------------------------------------------
+# Onboarding: mandatory username after wallet setup
+# ------------------------------------------------------------------
+
+@router.message(OnboardUsernameStates.waiting_username)
+async def msg_onboard_username(message: Message, state: FSMContext):
+    import re
+    raw = (message.text or "").strip().lstrip("@")
+    tg_id = message.from_user.id  # type: ignore
+
+    # Let slash commands pass through to other handlers
+    if raw.startswith("/"):
+        await message.answer("Set your username first (3-15 chars, letters/numbers/underscore):")
+        return
+
+    if not re.match(r'^[a-zA-Z0-9_]{3,15}$', raw):
+        await message.answer(
+            "Invalid username. Use 3-15 characters: letters, numbers, underscore.\n"
+            "Try again:"
+        )
+        return
+
+    if await is_username_taken(raw, exclude_tg_id=tg_id):
+        await message.answer(f"<b>@{raw}</b> is already taken. Try another one:")
+        return
+
+    await update_user(tg_id, username=raw)
+    await state.clear()
+
+    # Generate referral code based on username
+    await get_or_create_ref_code(tg_id)
+
+    user = await get_user(tg_id)
+    wallet = user["pacifica_account"] if user else "?"
+
+    if PACIFICA_NETWORK != "mainnet":
+        setup_note = (
+            "\n\n⏳ <b>Please wait ~10 seconds</b> — your wallet is being set up.\n"
+            "SOL + USDC are being sent automatically."
+        )
+    else:
+        setup_note = (
+            "\n\nSend SOL to your wallet for tx fees, then deposit USDC on Pacifica to start trading."
+        )
+
+    ref_link = f"https://t.me/{BOT_USERNAME}?start=ref_{raw}"
+    await message.answer(
+        f"<b>Welcome @{raw}!</b>\n\n"
+        f"Wallet: <code>{wallet[:8]}...{wallet[-4:]}</code>\n"
+        f"Referral link: <code>{ref_link}</code>"
+        f"{setup_note}",
+        reply_markup=main_menu_kb(),
+    )
+
+
+# ------------------------------------------------------------------
+# /username — change username
+# ------------------------------------------------------------------
+
+@router.message(Command("username"))
+async def cmd_username(message: Message, state: FSMContext):
+    tg_id = message.from_user.id  # type: ignore
+    user = await get_user(tg_id)
+    if not user:
+        await message.answer("Use /start first.", reply_markup=main_menu_kb())
+        return
+
+    args = (message.text or "").split()
+    if len(args) < 2:
+        current = user.get("username", "not set")
+        await message.answer(
+            f"<b>Your Username</b>\n\n"
+            f"Current: <b>@{current}</b>\n\n"
+            f"Change it: <code>/username NewName</code>\n"
+            f"Rules: 3-15 chars, letters/numbers/underscore only.",
+        )
+        return
+
+    import re
+    raw = args[1].strip().lstrip("@")
+
+    if not re.match(r'^[a-zA-Z0-9_]{3,15}$', raw):
+        await message.answer("Invalid username. Use 3-15 characters: letters, numbers, underscore.")
+        return
+
+    if await is_username_taken(raw, exclude_tg_id=tg_id):
+        await message.answer(f"<b>@{raw}</b> is already taken.")
+        return
+
+    old_name = user.get("username", "")
+    await update_user(tg_id, username=raw)
+
+    ref_link = f"https://t.me/{BOT_USERNAME}?start=ref_{raw}"
+    await message.answer(
+        f"<b>Username updated!</b>\n\n"
+        f"{'<b>@' + old_name + '</b> → ' if old_name else ''}<b>@{raw}</b>\n\n"
+        f"Your referral link: <code>{ref_link}</code>",
+        reply_markup=main_menu_kb(),
     )
 
 
@@ -905,7 +1015,6 @@ async def set_referral(callback: CallbackQuery):
 
     ref_code = await get_or_create_ref_code(tg_id)
     current_name = user.get("username") or ""
-    # Use username as ref link if set, fallback to random code
     ref_id = current_name if current_name else ref_code
     ref_link = f"https://t.me/{BOT_USERNAME}?start=ref_{ref_id}"
     stats = await get_referral_stats(tg_id)
@@ -931,11 +1040,10 @@ async def set_referral(callback: CallbackQuery):
     ])
     kb = InlineKeyboardMarkup(inline_keyboard=rows)
 
-    name_line = f"Username: <b>@{current_name}</b>\n" if current_name else ""
-
     await callback.message.edit_text(  # type: ignore
         f"<b>🎟️ Referral Program</b>\n\n"
-        f"{name_line}"
+        f"Username: <b>@{current_name}</b>\n"
+        f"Change: <code>/username NewName</code>\n\n"
         f"Share your link to earn <b>{ref_pct}%</b> of your friends' trading fees.\n"
         f"They get a <b>{rebate_pct}%</b> fee rebate.\n\n"
         f"<b>Your link:</b>\n<code>{ref_link}</code>\n\n"
@@ -1214,23 +1322,28 @@ async def cmd_help(message: Message):
     await message.answer(
         f"<b>{BOT_NAME}</b> — Pacifica Perps on Telegram\n\n"
         "Use the buttons to navigate, or type commands:\n\n"
-        "<b>Navigation:</b>\n"
-        "/menu — Main menu\n"
-        "/markets — Live prices\n\n"
-        "<b>Quick trading:</b>\n"
-        "/long BTC 100 10x\n"
-        "/short ETH 200 20x\n"
+        "<b>Trading:</b>\n"
+        "/long BTC 100 10x — Market long\n"
+        "/short ETH 200 20x — Market short\n"
         "/close BTC — Close position\n"
-        "/closeall — Close all positions\n\n"
-        "<b>Alerts:</b>\n"
-        "/alert BTC &gt;95000 — Price above\n"
-        "/alert ETH &lt;3000 — Price below\n\n"
-        "<b>Copy trading:</b>\n"
-        "/copy &lt;wallet&gt; [0.5x] [max=500]\n"
-        "/unfollow &lt;wallet&gt;\n\n"
+        "/closeall — Close all\n\n"
+        "<b>Advanced:</b>\n"
+        "/trail BTC 3 — Trailing stop 3%\n"
+        "/dca BTC long 500 10 4h 5 — DCA\n"
+        "/twap BTC long 5000 20 2h 5 — TWAP\n"
+        "/scale BTC long 1000 95k 100k 5 — Scaled\n"
+        "/calc BTC 100000 97000 2 — Risk calc\n"
+        "/funding BTC — Funding rates\n\n"
+        "<b>Copy Trading:</b>\n"
+        "/leaders — Browse leaders\n"
+        "/follow &lt;username&gt; — Follow leader\n"
+        "/leader — Become a leader\n"
+        "/copy &lt;wallet&gt; — Copy wallet\n\n"
         "<b>Account:</b>\n"
-        "/balance — Check balance\n"
-        "/positions — Open positions\n",
+        "/username NewName — Change username\n"
+        "/alert BTC &gt;95000 — Price alert\n"
+        "/watch &lt;wallet&gt; — On-chain tracker\n"
+        "/dashboard — Web dashboard\n",
         reply_markup=main_menu_kb(),
     )
 
