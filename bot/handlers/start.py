@@ -1401,3 +1401,35 @@ async def cmd_update(message: Message):
 
     except Exception as e:
         await message.answer(f"<b>Update failed</b>\n\n{e}")
+
+
+# ------------------------------------------------------------------
+# /setgroup — set alert group (admin only)
+# ------------------------------------------------------------------
+
+@router.message(Command("setgroup"))
+async def cmd_setgroup(message: Message):
+    from bot.config import ADMIN_IDS
+    tg_id = message.from_user.id  # type: ignore
+    if tg_id not in ADMIN_IDS:
+        await message.answer("Admin only.")
+        return
+
+    try:
+        # Accept optional group ID as argument: /setgroup -123456789
+        args = (message.text or "").split()
+        if len(args) > 1:
+            chat_id = int(args[1])
+        else:
+            chat_id = message.chat.id
+
+        from bot.services.group_feed import set_group_id
+        await set_group_id(chat_id)
+
+        await message.answer(
+            f"Alert group set!\n"
+            f"Group ID: <code>{chat_id}</code>\n\n"
+            f"Liquidation, whale, funding, and leader alerts will be posted there."
+        )
+    except Exception as e:
+        await message.answer(f"Error: {e}")

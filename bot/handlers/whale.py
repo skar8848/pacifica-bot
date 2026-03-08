@@ -301,23 +301,3 @@ async def cmd_codes(msg: types.Message):
     await msg.answer("\n".join(lines))
 
 
-# ------------------------------------------------------------------
-# /setgroup — set alert group ID (admin only, run inside the group)
-# ------------------------------------------------------------------
-
-@router.message(Command("setgroup"))
-async def cmd_setgroup(msg: types.Message):
-    from bot.config import ADMIN_IDS
-    if msg.from_user.id not in ADMIN_IDS:
-        await msg.answer("Admin only.")
-        return
-
-    chat_id = msg.chat.id
-    from bot.services.group_feed import set_group_id
-    await set_group_id(chat_id)
-
-    await msg.answer(
-        f"Alert group set to this chat.\n"
-        f"Group ID: <code>{chat_id}</code>\n\n"
-        f"Liquidation, whale, funding, and leader alerts will be posted here."
-    )
