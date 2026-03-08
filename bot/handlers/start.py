@@ -1538,3 +1538,111 @@ async def cmd_hlwhale(message: Message):
             )
     except Exception as e:
         await message.answer(f"Error: {e}")
+
+
+# ------------------------------------------------------------------
+# /copyhl — copy trade from Hyperliquid whale to Pacifica
+# ------------------------------------------------------------------
+
+@router.message(Command("copyhl"))
+async def cmd_copyhl(message: Message):
+    tg_id = message.from_user.id  # type: ignore
+    user = await get_user(tg_id)
+    if not user or not user.get("pacifica_account"):
+        await message.answer("Please /start and link your account first.", reply_markup=main_menu_kb())
+        return
+
+    args = (message.text or "").split()
+    if len(args) < 2:
+        await message.answer(
+            "<b>HL Mirror Copy Trading</b>\n\n"
+            "Copy a Hyperliquid whale's trades onto Pacifica.\n\n"
+            "<code>/copyhl 0x... $10</code> — fixed $10/trade\n"
+            "<code>/copyhl 0x... 5%</code> — 5% of equity\n"
+            "<code>/copyhl 0x... 0.01x</code> — proportional\n\n"
+            "Check whales: <code>/hlwhale check 0x...</code>\n"
+            "Stop: <code>/unfollow 0x...</code>",
+            reply_markup=back_to_menu_kb(),
+        )
+        return
+
+    wallet = args[1].lower()
+    if not wallet.startswith("0x") or len(wallet) < 20:
+        await message.answer("Invalid HL address. Must start with 0x.")
+        return
+
+    # Parse sizing
+    sizing_mode = "fixed_usd"
+    fixed_amount = 10.0
+    pct_equity = 5.0
+    size_mult = 0.01
+    max_pos = 1000.0
+
+    if len(args) > 2:
+        raw = args[2]
+        if raw.startswith("$"):
+            try:
+                sizing_mode = "fixed_usd"
+                fixed_amount = float(raw.lstrip("$"))
+            except ValueError:
+                pass
+        elif raw.endswith("%"):
+            try:
+                sizing_mode = "pct_equity"
+                pct_equity = float(raw.rstrip("%"))
+            except ValueError:
+                pass
+        elif raw.lower().endswith("x"):
+            try:
+                sizing_mode = "proportional"
+                size_mult = float(raw.lower().rstrip("x"))
+            except ValueError:
+                pass
+
+    if len(args) > 3:
+        try:
+            max_pos = float(args[3].lstrip("$"))
+        except ValueError:
+            pass
+
+    # Verify wallet has positions on HL
+    try:
+        from bot.services.hl_whale_tracker import hl_get_positions, _fmt_usd
+        state = await hl_get_positions(wallet)
+        av = float(state.get("marginSummary", {}).get("accountValue", "0"))
+        n_pos = len(state.get("assetPositions", []))
+    except Exception:
+        av = 0
+        n_pos = 0
+
+    # Save config with source='hyperliquid'
+    db = await get_db()
+    await db.execute(
+        """INSERT INTO copy_configs
+           (telegram_id, master_wallet, sizing_mode, size_multiplier,
+            fixed_amount_usd, pct_equity, max_position_usd, max_total_usd, source)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'hyperliquid')""",
+        (tg_id, wallet, sizing_mode, size_mult,
+         fixed_amount, pct_equity, max_pos, 5000),
+    )
+    await db.commit()
+
+    if sizing_mode == "fixed_usd":
+        size_str = f"${fixed_amount:.0f}/trade"
+    elif sizing_mode == "pct_equity":
+        size_str = f"{pct_equity:.0f}% equity"
+    else:
+        size_str = f"{size_mult}x proportional"
+
+    short = f"{wallet[:6]}...{wallet[-4:]}"
+    await message.answer(
+        f"<b>HL Mirror Copy Active!</b>\n\n"
+        f"Whale: <code>{short}</code>\n"
+        f"HL Account: {_fmt_usd(av)} | {n_pos} positions\n\n"
+        f"Size: {size_str} | Cap: ${max_pos:,.0f}\n"
+        f"Source: Hyperliquid \u2192 Pacifica\n\n"
+        f"When this whale opens/closes on HL, the same trade\n"
+        f"will be mirrored on your Pacifica account.\n\n"
+        f"Stop: <code>/unfollow {wallet}</code>",
+        reply_markup=back_to_menu_kb(),
+    )

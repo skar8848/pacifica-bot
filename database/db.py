@@ -230,6 +230,7 @@ async def _init_tables(db: aiosqlite.Connection):
         "ALTER TABLE copy_configs ADD COLUMN pct_equity REAL DEFAULT 5.0",
         "ALTER TABLE copy_configs ADD COLUMN min_trade_usd REAL DEFAULT 0",
         "ALTER TABLE copy_configs ADD COLUMN max_total_usd REAL DEFAULT 5000",
+        "ALTER TABLE copy_configs ADD COLUMN source TEXT DEFAULT 'pacifica'",
     ]
     for sql in migrations:
         try:
@@ -337,10 +338,10 @@ async def add_copy_config(
 async def get_active_copy_configs(telegram_id: int | None = None) -> list[dict]:
     db = await get_db()
     if telegram_id:
-        q = "SELECT * FROM copy_configs WHERE telegram_id = ? AND active = 1"
+        q = "SELECT * FROM copy_configs WHERE telegram_id = ? AND active = 1 AND COALESCE(source, 'pacifica') = 'pacifica'"
         params = (telegram_id,)
     else:
-        q = "SELECT * FROM copy_configs WHERE active = 1"
+        q = "SELECT * FROM copy_configs WHERE active = 1 AND COALESCE(source, 'pacifica') = 'pacifica'"
         params = ()
     async with db.execute(q, params) as cursor:
         return [dict(r) for r in await cursor.fetchall()]
