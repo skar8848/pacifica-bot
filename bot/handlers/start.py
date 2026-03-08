@@ -1433,3 +1433,108 @@ async def cmd_setgroup(message: Message):
         )
     except Exception as e:
         await message.answer(f"Error: {e}")
+
+
+# ------------------------------------------------------------------
+# /hlwhale — manage Hyperliquid whale tracking (admin only)
+# ------------------------------------------------------------------
+
+@router.message(Command("hlwhale"))
+async def cmd_hlwhale(message: Message):
+    from bot.config import ADMIN_IDS
+    tg_id = message.from_user.id  # type: ignore
+    if tg_id not in ADMIN_IDS:
+        await message.answer("Admin only.")
+        return
+
+    args = (message.text or "").split()
+
+    try:
+        from bot.services.hl_whale_tracker import (
+            add_hl_wallet, remove_hl_wallet, get_hl_tracked_wallets,
+            discover_whales, hl_get_positions, _fmt_usd,
+        )
+
+        if len(args) < 2:
+            wallets = await get_hl_tracked_wallets()
+            if not wallets:
+                await message.answer(
+                    "<b>HL Whale Tracker</b>\n\n"
+                    "No wallets tracked.\n\n"
+                    "<code>/hlwhale add 0x... [label]</code>\n"
+                    "<code>/hlwhale remove 0x...</code>\n"
+                    "<code>/hlwhale scan</code> — auto-discover whales\n"
+                    "<code>/hlwhale check 0x...</code> — check a wallet"
+                )
+                return
+
+            lines = ["<b>HL Tracked Wallets</b>\n"]
+            for w in wallets:
+                addr = w["address"]
+                label = w.get("label") or ""
+                short = f"{addr[:6]}...{addr[-4:]}"
+                label_str = f" ({label})" if label else ""
+                lines.append(f"<code>{short}</code>{label_str}")
+            lines.append(f"\nTotal: {len(wallets)}")
+            await message.answer("\n".join(lines))
+            return
+
+        cmd = args[1].lower()
+
+        if cmd == "add" and len(args) >= 3:
+            addr = args[2].lower()
+            label = " ".join(args[3:]) if len(args) > 3 else None
+            added = await add_hl_wallet(addr, label=label)
+            if added:
+                await message.answer(f"Added <code>{addr[:8]}...</code> to HL tracking.")
+            else:
+                await message.answer("Already tracked.")
+
+        elif cmd == "remove" and len(args) >= 3:
+            addr = args[2].lower()
+            removed = await remove_hl_wallet(addr)
+            await message.answer("Removed." if removed else "Not found.")
+
+        elif cmd == "scan":
+            await message.answer("Scanning for HL whales...")
+            found = await discover_whales()
+            await message.answer(f"Found <b>{len(found)}</b> new whales.")
+
+        elif cmd == "check" and len(args) >= 3:
+            addr = args[2]
+            state = await hl_get_positions(addr)
+            av = float(state.get("marginSummary", {}).get("accountValue", "0"))
+            positions = state.get("assetPositions", [])
+
+            lines = [
+                f"<b>HL Wallet Check</b>\n",
+                f"<code>{addr}</code>",
+                f"Account: <b>{_fmt_usd(av)}</b>",
+                f"Positions: {len(positions)}\n",
+            ]
+            for p in positions[:10]:
+                pos = p.get("position", p)
+                coin = pos.get("coin", "?")
+                szi = float(pos.get("szi", "0"))
+                ntl = abs(float(pos.get("positionValue", "0")))
+                side = "LONG" if szi > 0 else "SHORT"
+                entry = pos.get("entryPx", "?")
+                upnl = float(pos.get("unrealizedPnl", "0"))
+                lev = pos.get("leverage", {})
+                lev_val = lev.get("value", "?") if isinstance(lev, dict) else str(lev)
+                lines.append(
+                    f"  {coin} {side} {_fmt_usd(ntl)} ({lev_val}x) "
+                    f"entry=${entry} uPnL={_fmt_usd(upnl)}"
+                )
+            await message.answer("\n".join(lines))
+
+        else:
+            await message.answer(
+                "<code>/hlwhale</code> — list tracked\n"
+                "<code>/hlwhale add 0x... [label]</code>\n"
+                "<code>/hlwhale remove 0x...</code>\n"
+                "<code>/hlwhale scan</code>\n"
+                "<code>/hlwhale check 0x...</code>"
+            )
+    except Exception as e:
+        await message.answer(f"Error: {e}")

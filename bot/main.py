@@ -46,6 +46,7 @@ async def on_startup(bot: Bot):
     from bot.services.dca_engine import start_dca_engine
     from bot.services.twap_engine import start_twap_engine
     from bot.services.onchain_tracker import start_onchain_tracker
+    from bot.services.hl_whale_tracker import start_hl_whale_tracker
 
     asyncio.create_task(start_copy_engine(bot))
     asyncio.create_task(start_gas_monitor(bot))
@@ -57,6 +58,7 @@ async def on_startup(bot: Bot):
     asyncio.create_task(start_dca_engine(bot))
     asyncio.create_task(start_twap_engine(bot))
     asyncio.create_task(start_onchain_tracker(bot))
+    asyncio.create_task(start_hl_whale_tracker(bot))
     logger.info("Background services started.")
 
 
@@ -74,6 +76,7 @@ async def on_shutdown(bot: Bot):
     from bot.services.dca_engine import stop_dca_engine
     from bot.services.twap_engine import stop_twap_engine
     from bot.services.onchain_tracker import stop_onchain_tracker
+    from bot.services.hl_whale_tracker import stop_hl_whale_tracker
 
     stop_copy_engine()
     stop_gas_monitor()
@@ -85,6 +88,7 @@ async def on_shutdown(bot: Bot):
     stop_dca_engine()
     stop_twap_engine()
     stop_onchain_tracker()
+    stop_hl_whale_tracker()
     await close_market_data()
     await close_db()
 
