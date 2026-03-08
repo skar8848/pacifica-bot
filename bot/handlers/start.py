@@ -356,16 +356,11 @@ async def onboard_generate(callback: CallbackQuery, state: FSMContext):
 # Onboarding: mandatory username after wallet setup
 # ------------------------------------------------------------------
 
-@router.message(OnboardUsernameStates.waiting_username)
+@router.message(OnboardUsernameStates.waiting_username, F.text, ~F.text.startswith("/"))
 async def msg_onboard_username(message: Message, state: FSMContext):
     import re
     raw = (message.text or "").strip().lstrip("@")
     tg_id = message.from_user.id  # type: ignore
-
-    # Let slash commands pass through to other handlers
-    if raw.startswith("/"):
-        await message.answer("Set your username first (3-15 chars, letters/numbers/underscore):")
-        return
 
     if not re.match(r'^[a-zA-Z0-9_]{3,15}$', raw):
         await message.answer(
