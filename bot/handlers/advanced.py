@@ -882,3 +882,184 @@ async def cmd_watch(message: Message):
         )
     else:
         await message.answer("Already watching this wallet.")
+
+
+# ------------------------------------------------------------------
+# /grid — start grid trading bot
+# ------------------------------------------------------------------
+
+@router.message(Command("grid"))
+async def cmd_grid(message: Message):
+    user = await get_user(message.from_user.id)
+    if not user or not user.get("pacifica_account"):
+        await message.answer("Please /start first.")
+        return
+
+    parts = (message.text or "").split()
+    # /grid SYMBOL LOW HIGH GRIDS TOTAL_USD
+    if len(parts) < 6:
+        await message.answer(
+            "<b>Grid Trading Bot</b>\n\n"
+            "Places buy/sell orders across a price range.\n"
+            "Profits from price oscillation within the range.\n\n"
+            "<b>Usage:</b>\n"
+            "<code>/grid BTC 60000 70000 10 $100</code>\n\n"
+            "Symbol: BTC\n"
+            "Range: $60,000 — $70,000\n"
+            "Grids: 10 levels\n"
+            "Total: $100 allocated\n\n"
+            "Stop: <code>/grid_stop</code>"
+        )
+        return
+
+    symbol = parts[1].upper()
+    try:
+        price_low = float(parts[2])
+        price_high = float(parts[3])
+        num_grids = int(parts[4])
+        total_usd = float(parts[5].lstrip("$"))
+    except ValueError:
+        await message.answer("Invalid numbers. Usage: <code>/grid BTC 60000 70000 10 $100</code>")
+        return
+
+    if price_low >= price_high:
+        await message.answer("Low price must be less than high price.")
+        return
+    if num_grids < 2 or num_grids > 50:
+        await message.answer("Grid count must be 2-50.")
+        return
+    if total_usd < 5:
+        await message.answer("Minimum total: $5.")
+        return
+
+    current = await get_price(symbol)
+    if not current:
+        await message.answer(f"Can't find price for {symbol}.")
+        return
+
+    from bot.services.grid_engine import add_grid_config
+    grid_id = await add_grid_config(
+        message.from_user.id, symbol, price_low, price_high, num_grids, total_usd,
+    )
+
+    amount_per = total_usd / num_grids
+    grid_step = (price_high - price_low) / num_grids
+
+    await message.answer(
+        f"<b>Grid Bot Started</b>\n\n"
+        f"ID: #{grid_id}\n"
+        f"Symbol: {symbol}\n"
+        f"Range: ${price_low:,.0f} — ${price_high:,.0f}\n"
+        f"Grids: {num_grids} (step: ${grid_step:,.0f})\n"
+        f"Per grid: ~${amount_per:,.1f}\n"
+        f"Current price: ${current:,.2f}\n\n"
+        f"The bot will buy low / sell high within the range.\n"
+        f"Stop: <code>/grid_stop</code>"
+    )
+
+
+@router.message(Command("grid_stop"))
+async def cmd_grid_stop(message: Message):
+    tg_id = message.from_user.id
+    from bot.services.grid_engine import get_active_grids, cancel_grid
+    grids = await get_active_grids(tg_id)
+
+    if not grids:
+        await message.answer("No active grid bots.")
+        return
+
+    for g in grids:
+        await cancel_grid(g["id"], tg_id)
+
+    pnl_total = sum(g.get("realized_pnl", 0) for g in grids)
+    await message.answer(
+        f"Stopped <b>{len(grids)}</b> grid bot(s).\n"
+        f"Total realized PnL: <code>${pnl_total:,.2f}</code>"
+    )
+
+
+# ------------------------------------------------------------------
+# /arb — funding rate arbitrage scanner
+# ------------------------------------------------------------------
+
+@router.message(Command("arb"))
+async def cmd_arb(message: Message):
+    await message.answer("Scanning funding spreads HL vs Pacifica...")
+
+    try:
+        from bot.services.funding_arb import scan_funding_spreads
+        spreads = await scan_funding_spreads()
+    except Exception as e:
+        await message.answer(f"Error: {e}")
+        return
+
+    if not spreads:
+        await message.answer("No funding data available.")
+        return
+
+    # Sort by absolute spread
+    spreads.sort(key=lambda x: abs(x["spread"]), reverse=True)
+
+    lines = ["<b>Funding Arb Opportunities</b>\n", "<b>HL vs Pacifica (hourly rates)</b>\n"]
+    for s in spreads[:10]:
+        symbol = s["symbol"]
+        hl = s["hl_rate"]
+        pac = s["pacifica_rate"]
+        spread = s["spread"]
+        annual = abs(spread) * 24 * 365 * 100
+
+        if spread > 0:
+            direction = f"long Pac / short HL"
+        else:
+            direction = f"long HL / short Pac"
+
+        emoji = "🟢" if abs(spread) >= 0.0005 else "⚪"
+        lines.append(
+            f"{emoji} <b>{symbol}</b>\n"
+            f"  HL: {hl*100:+.4f}% | Pac: {pac*100:+.4f}%\n"
+            f"  Spread: <b>{spread*100:.4f}%/hr</b> (~{annual:.0f}% APR)\n"
+            f"  → {direction}\n"
+        )
+
+    if not any(abs(s["spread"]) >= 0.0001 for s in spreads):
+        lines.append("\n<i>No significant spreads right now.</i>")
+
+    await message.answer("\n".join(lines))
+
+
+# ------------------------------------------------------------------
+# /gaps — cross-exchange price comparison
+# ------------------------------------------------------------------
+
+@router.message(Command("gaps"))
+async def cmd_gaps(message: Message):
+    await message.answer("Comparing prices HL vs Pacifica...")
+
+    try:
+        from bot.services.gap_monitor import _get_hl_prices, _get_pacifica_data
+        hl_prices = await _get_hl_prices()
+        pac_data = await _get_pacifica_data()
+    except Exception as e:
+        await message.answer(f"Error: {e}")
+        return
+
+    gaps = []
+    for symbol, pac in pac_data.items():
+        pac_price = pac.get("price", 0)
+        hl_price = hl_prices.get(symbol, 0)
+        if not pac_price or not hl_price:
+            continue
+        gap_pct = (hl_price - pac_price) / pac_price * 100
+        gaps.append((symbol, pac_price, hl_price, gap_pct))
+
+    gaps.sort(key=lambda x: abs(x[3]), reverse=True)
+
+    lines = ["<b>Price Gaps — HL vs Pacifica</b>\n"]
+    for symbol, pac_p, hl_p, gap in gaps[:15]:
+        emoji = "🔴" if abs(gap) >= 0.5 else "🟡" if abs(gap) >= 0.2 else "⚪"
+        lines.append(
+            f"{emoji} <b>{symbol}</b>: ${hl_p:,.2f} (HL) vs ${pac_p:,.2f} (Pac) — "
+            f"<b>{gap:+.3f}%</b>"
+        )
+
+    await message.answer("\n".join(lines))

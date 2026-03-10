@@ -48,6 +48,9 @@ async def on_startup(bot: Bot):
     from bot.services.onchain_tracker import start_onchain_tracker
     from bot.services.hl_whale_tracker import start_hl_whale_tracker
     from bot.services.hl_copy_engine import start_hl_copy_engine
+    from bot.services.grid_engine import start_grid_engine
+    from bot.services.funding_arb import start_funding_arb
+    from bot.services.gap_monitor import start_gap_monitor
 
     asyncio.create_task(start_copy_engine(bot))
     asyncio.create_task(start_gas_monitor(bot))
@@ -61,6 +64,9 @@ async def on_startup(bot: Bot):
     asyncio.create_task(start_onchain_tracker(bot))
     asyncio.create_task(start_hl_whale_tracker(bot))
     asyncio.create_task(start_hl_copy_engine(bot))
+    asyncio.create_task(start_grid_engine(bot))
+    asyncio.create_task(start_funding_arb(bot))
+    asyncio.create_task(start_gap_monitor(bot))
     logger.info("Background services started.")
 
 
@@ -80,6 +86,9 @@ async def on_shutdown(bot: Bot):
     from bot.services.onchain_tracker import stop_onchain_tracker
     from bot.services.hl_whale_tracker import stop_hl_whale_tracker
     from bot.services.hl_copy_engine import stop_hl_copy_engine
+    from bot.services.grid_engine import stop_grid_engine
+    from bot.services.funding_arb import stop_funding_arb
+    from bot.services.gap_monitor import stop_gap_monitor
 
     stop_copy_engine()
     stop_gas_monitor()
@@ -93,6 +102,9 @@ async def on_shutdown(bot: Bot):
     stop_onchain_tracker()
     stop_hl_whale_tracker()
     stop_hl_copy_engine()
+    stop_grid_engine()
+    stop_funding_arb()
+    stop_gap_monitor()
     await close_market_data()
     await close_db()
 
