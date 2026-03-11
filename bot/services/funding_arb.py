@@ -33,6 +33,8 @@ SCAN_INTERVAL = 300  # 5 minutes
 ALERT_THRESHOLD = 0.0001  # 0.01% per hour  (~87% annualized)
 EXIT_THRESHOLD = 0.00002  # 0.002% per hour  (~17% annualized) — close when spread narrows
 
+MAX_DRAWDOWN_USD = 100  # close all arb positions if total est. loss exceeds this
+
 HL_API_URL = "https://api.hyperliquid.xyz/info"
 
 # In-memory cache of last posted alert time per symbol to avoid spam
@@ -192,6 +194,81 @@ async def _pac_get_funding_rates() -> dict[str, float]:
 
 
 # ------------------------------------------------------------------
+# Orderbook liquidity check
+# ------------------------------------------------------------------
+
+async def _check_pacifica_liquidity(symbol: str, size_usd: float) -> bool:
+    """Check whether the Pacifica orderbook has enough depth within 0.5% of
+    mid price to absorb *size_usd* without excessive slippage.
+
+    Returns True if sufficient liquidity exists, False otherwise.
+    """
+    from solders.keypair import Keypair as _Kp
+
+    client = PacificaClient(account="public", keypair=_Kp())
+    try:
+        ob = await client.get_orderbook(symbol)
+    except Exception as e:
+        logger.warning("Liquidity check failed for %s: %s", symbol, e)
+        return False
+    finally:
+        await client.close()
+
+    bids = ob.get("bids", [])
+    asks = ob.get("asks", [])
+
+    if not bids or not asks:
+        logger.warning("Empty orderbook for %s — skipping liquidity check", symbol)
+        return False
+
+    # Mid price from best bid / best ask
+    best_bid = float(bids[0][0]) if isinstance(bids[0], (list, tuple)) else float(bids[0].get("price", 0))
+    best_ask = float(asks[0][0]) if isinstance(asks[0], (list, tuple)) else float(asks[0].get("price", 0))
+
+    if best_bid <= 0 or best_ask <= 0:
+        return False
+
+    mid = (best_bid + best_ask) / 2.0
+    lower_bound = mid * 0.995  # 0.5% below mid
+    upper_bound = mid * 1.005  # 0.5% above mid
+
+    # Sum bid depth within 0.5% of mid
+    bid_depth_usd = 0.0
+    for level in bids:
+        if isinstance(level, (list, tuple)):
+            px, qty = float(level[0]), float(level[1])
+        else:
+            px, qty = float(level.get("price", 0)), float(level.get("size", 0))
+        if px < lower_bound:
+            break
+        bid_depth_usd += px * qty
+
+    # Sum ask depth within 0.5% of mid
+    ask_depth_usd = 0.0
+    for level in asks:
+        if isinstance(level, (list, tuple)):
+            px, qty = float(level[0]), float(level[1])
+        else:
+            px, qty = float(level.get("price", 0)), float(level.get("size", 0))
+        if px > upper_bound:
+            break
+        ask_depth_usd += px * qty
+
+    # Require at least 2x the position size in available depth on both sides
+    required = size_usd * 2
+    sufficient = bid_depth_usd >= required and ask_depth_usd >= required
+
+    if not sufficient:
+        logger.info(
+            "Insufficient Pacifica liquidity for %s ($%.0f): "
+            "bid_depth=$%.0f ask_depth=$%.0f (need $%.0f each side within 0.5%%)",
+            symbol, size_usd, bid_depth_usd, ask_depth_usd, required,
+        )
+
+    return sufficient
+
+
+# ------------------------------------------------------------------
 # Spread scanning
 # ------------------------------------------------------------------
 
@@ -307,18 +384,20 @@ async def post_funding_spread_alert(bot: Bot, spreads: list[dict]):
         bar = _spread_bar(s["annualized_pct"])
 
         lines.append(
-            f"<b>{i}. {s['symbol']}</b>"
+            f"<b>{i}. {s['symbol']}</b>  {bar}"
         )
         lines.append(
             f"   HL: <code>{_fmt_rate(s['hl_rate'])}</code>/hr  |  "
             f"Pac: <code>{_fmt_rate(s['pacifica_rate'])}</code>/hr"
         )
         lines.append(
-            f"   Spread: <code>{_fmt_rate(s['abs_spread'])}</code>/hr "
-            f"({s['annualized_pct']:.1f}% APR)"
+            f"   Spread: <code>{_fmt_rate(s['abs_spread'])}</code>/hr"
         )
         lines.append(
-            f"   {bar} Long {long_on} / Short {short_on}"
+            f"   <b>Annualized APR: {s['annualized_pct']:.1f}%</b>"
+        )
+        lines.append(
+            f"   Strategy: Long {long_on} / Short {short_on}"
         )
         lines.append("")
 
@@ -370,6 +449,14 @@ async def open_arb_position(
 
     # Determine Pacifica side
     pac_side = "buy" if long_exchange == "pacifica" else "sell"
+
+    # --- Orderbook liquidity check before opening ---
+    if not await _check_pacifica_liquidity(symbol, size_usd):
+        logger.warning(
+            "Skipping arb for %s: insufficient Pacifica orderbook liquidity "
+            "for $%.0f", symbol, size_usd,
+        )
+        return None
 
     try:
         kp = decrypt_private_key(user["agent_wallet_encrypted"])
@@ -550,14 +637,101 @@ async def _monitor_arb_positions(bot: Bot):
 
             # Notify user about auto-close
             try:
+                annualized = current_spread * 24 * 365 * 100
                 text = (
                     f"<b>Funding Arb Auto-Closed</b>\n\n"
                     f"<b>{symbol}</b> spread narrowed below exit threshold.\n"
                     f"Entry spread: <code>{_fmt_rate(pos['entry_spread'])}</code>/hr\n"
-                    f"Exit spread: <code>{_fmt_rate(current_spread)}</code>/hr\n"
+                    f"Exit spread: <code>{_fmt_rate(current_spread)}</code>/hr "
+                    f"({annualized:.1f}% APR)\n"
                     f"Est. accumulated PnL: <code>${accumulated:,.2f}</code>"
                 )
                 await bot.send_message(pos["telegram_id"], text)
+            except Exception:
+                pass
+            continue
+
+        # Stale position warning: held > 72h with spread below 2x alert threshold
+        created_at = pos.get("created_at")
+        if created_at:
+            if isinstance(created_at, str):
+                try:
+                    created_dt = datetime.fromisoformat(created_at)
+                except ValueError:
+                    created_dt = datetime.strptime(created_at, "%Y-%m-%d %H:%M:%S")
+            else:
+                created_dt = created_at
+            hours_held = (datetime.utcnow() - created_dt).total_seconds() / 3600.0
+            if hours_held > 72 and current_spread < (2 * ALERT_THRESHOLD):
+                logger.warning(
+                    "Stale arb position %s (%s): held %.1fh, spread %.6f "
+                    "below 2x alert threshold (%.6f). Consider manual review.",
+                    pos["id"], symbol, hours_held, current_spread,
+                    2 * ALERT_THRESHOLD,
+                )
+
+
+# ------------------------------------------------------------------
+# Max drawdown protection
+# ------------------------------------------------------------------
+
+async def _check_max_drawdown(bot: Bot):
+    """Close ALL active arb positions if estimated total loss exceeds
+    MAX_DRAWDOWN_USD.  This is a safety net to cap losses when spreads
+    move adversely for extended periods.
+    """
+    positions = await _get_active_arb_positions()
+    if not positions:
+        return
+
+    spreads = await scan_funding_spreads()
+    spread_map = {s["symbol"]: s for s in spreads}
+
+    total_pnl = 0.0
+    for pos in positions:
+        accumulated = pos.get("accumulated_pnl") or 0.0
+        symbol = pos["symbol"]
+        current = spread_map.get(symbol)
+
+        if current:
+            # Add an incremental estimate for the current cycle
+            current_spread = current["abs_spread"]
+            entry_spread = pos.get("entry_spread", 0)
+            # If the spread has moved against us (narrowed), estimate a loss
+            # proportional to how much the spread changed vs entry
+            spread_change = current_spread - entry_spread
+            incremental = spread_change * pos["size_usd"] * (SCAN_INTERVAL / 3600.0)
+            total_pnl += accumulated + incremental
+        else:
+            total_pnl += accumulated
+
+    if total_pnl < -MAX_DRAWDOWN_USD:
+        logger.critical(
+            "MAX DRAWDOWN triggered: total estimated PnL = $%.2f "
+            "(threshold = -$%.0f). Closing ALL %d arb positions.",
+            total_pnl, MAX_DRAWDOWN_USD, len(positions),
+        )
+
+        for pos in positions:
+            try:
+                await close_arb_position(pos, bot)
+            except Exception as e:
+                logger.error("Failed to close arb position %s during drawdown: %s",
+                             pos["id"], e)
+
+        # Alert all affected users
+        user_ids = {pos["telegram_id"] for pos in positions}
+        for uid in user_ids:
+            try:
+                text = (
+                    f"<b>\u26a0\ufe0f Max Drawdown Protection Triggered</b>\n\n"
+                    f"Total estimated arb PnL reached "
+                    f"<code>${total_pnl:,.2f}</code> "
+                    f"(limit: -${MAX_DRAWDOWN_USD:,.0f}).\n\n"
+                    f"All funding arb positions have been closed "
+                    f"to prevent further losses."
+                )
+                await bot.send_message(uid, text)
             except Exception:
                 pass
 
@@ -587,6 +761,9 @@ async def start_funding_arb(bot: Bot):
 
             # Monitor existing arb positions
             await _monitor_arb_positions(bot)
+
+            # Max drawdown safety check
+            await _check_max_drawdown(bot)
 
         except Exception as e:
             logger.error("Funding arb loop error: %s", e, exc_info=True)

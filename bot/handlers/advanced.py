@@ -87,11 +87,9 @@ async def cmd_calc(message: Message):
     # Get account equity
     from bot.services.wallet_manager import decrypt_private_key
     from bot.services.pacifica_client import PacificaClient
-    from solders.keypair import Keypair
 
     try:
-        pk_bytes = decrypt_private_key(user["agent_wallet_encrypted"])
-        kp = Keypair.from_bytes(pk_bytes)
+        kp = decrypt_private_key(user["agent_wallet_encrypted"])
         client = PacificaClient(account=user["pacifica_account"], keypair=kp)
         try:
             info = await client.get_account_info()
@@ -278,10 +276,8 @@ async def cmd_trailing_stop(message: Message):
     # Get current position
     from bot.services.wallet_manager import decrypt_private_key
     from bot.services.pacifica_client import PacificaClient
-    from solders.keypair import Keypair
 
-    pk_bytes = decrypt_private_key(user["agent_wallet_encrypted"])
-    kp = Keypair.from_bytes(pk_bytes)
+    kp = decrypt_private_key(user["agent_wallet_encrypted"])
     client = PacificaClient(account=user["pacifica_account"], keypair=kp)
 
     try:
@@ -512,10 +508,8 @@ async def cmd_scale(message: Message):
     # Place the limit orders
     from bot.services.wallet_manager import decrypt_private_key
     from bot.services.pacifica_client import PacificaClient
-    from solders.keypair import Keypair
 
-    pk_bytes = decrypt_private_key(user["agent_wallet_encrypted"])
-    kp = Keypair.from_bytes(pk_bytes)
+    kp = decrypt_private_key(user["agent_wallet_encrypted"])
     client = PacificaClient(account=user["pacifica_account"], keypair=kp)
 
     amount_per_level = total / levels
@@ -526,8 +520,6 @@ async def cmd_scale(message: Message):
     order_lines = []
 
     try:
-        from bot.config import BUILDER_CODE, BUILDER_FEE_RATE
-
         for i in range(levels):
             price = price_low + (price_step * i)
             token_amount = usd_to_token(amount_per_level, price, lot_size)
@@ -536,16 +528,14 @@ async def cmd_scale(message: Message):
                 continue
 
             order_side = "buy" if side == "long" else "sell"
+            tick_level = int(round(price / float(tick_size))) if float(tick_size) > 0 else int(price)
 
             try:
                 await client.create_limit_order(
                     symbol=symbol,
                     side=order_side,
                     amount=token_amount,
-                    price=str(price),
-                    leverage=str(leverage),
-                    builder_code=BUILDER_CODE,
-                    builder_fee_rate=BUILDER_FEE_RATE,
+                    tick_level=tick_level,
                 )
                 placed += 1
                 order_lines.append(f"  ${price:,.2f} — {token_amount} tokens (${amount_per_level:,.0f})")
@@ -913,6 +903,8 @@ async def cmd_grid(message: Message):
         return
 
     symbol = parts[1].upper()
+    if not symbol.endswith("-PERP"):
+        symbol += "-PERP"
     try:
         price_low = float(parts[2])
         price_high = float(parts[3])
@@ -1033,11 +1025,43 @@ async def cmd_arb(message: Message):
 
 @router.message(Command("gaps"))
 async def cmd_gaps(message: Message):
+    parts = (message.text or "").split()
+
+    # /gaps stats — show gap tracking statistics
+    if len(parts) > 1 and parts[1].lower() == "stats":
+        try:
+            from bot.services.gap_monitor import get_gap_stats
+            stats = get_gap_stats()
+        except Exception as e:
+            await message.answer(f"Error: {e}")
+            return
+
+        if not stats:
+            await message.answer("No gap data collected yet. Stats build over time.")
+            return
+
+        lines = ["<b>Gap Tracking Statistics</b>\n"]
+        for s in stats[:10]:
+            emoji = "\U0001f534" if abs(s["avg_gap"]) >= 0.5 else "\U0001f7e1" if abs(s["avg_gap"]) >= 0.2 else "\u26aa"
+            lines.append(
+                f"{emoji} <b>{s['symbol']}</b>\n"
+                f"  Avg: <code>{s['avg_gap']:.4f}%</code> | "
+                f"Max: <code>{s['max_gap']:.4f}%</code> | "
+                f"Min: <code>{s['min_gap']:.4f}%</code>\n"
+                f"  Now: <code>{s['current_gap']:.4f}%</code> | "
+                f"Samples: {s['samples']}"
+            )
+        lines.append("\n<i>Use /gaps for live snapshot</i>")
+        await message.answer("\n".join(lines))
+        return
+
     await message.answer("Comparing prices HL vs Pacifica...")
 
     try:
         from bot.services.gap_monitor import _get_hl_prices, _get_pacifica_data
-        hl_prices = await _get_hl_prices()
+        import asyncio
+        loop = asyncio.get_running_loop()
+        hl_prices = await loop.run_in_executor(None, _get_hl_prices)
         pac_data = await _get_pacifica_data()
     except Exception as e:
         await message.answer(f"Error: {e}")
@@ -1056,10 +1080,11 @@ async def cmd_gaps(message: Message):
 
     lines = ["<b>Price Gaps — HL vs Pacifica</b>\n"]
     for symbol, pac_p, hl_p, gap in gaps[:15]:
-        emoji = "🔴" if abs(gap) >= 0.5 else "🟡" if abs(gap) >= 0.2 else "⚪"
+        emoji = "\U0001f534" if abs(gap) >= 0.5 else "\U0001f7e1" if abs(gap) >= 0.2 else "\u26aa"
         lines.append(
             f"{emoji} <b>{symbol}</b>: ${hl_p:,.2f} (HL) vs ${pac_p:,.2f} (Pac) — "
             f"<b>{gap:+.3f}%</b>"
         )
 
+    lines.append("\n<i>Use /gaps stats for tracking data</i>")
     await message.answer("\n".join(lines))
