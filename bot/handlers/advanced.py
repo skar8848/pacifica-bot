@@ -1088,3 +1088,94 @@ async def cmd_gaps(message: Message):
 
     lines.append("\n<i>Use /gaps stats for tracking data</i>")
     await message.answer("\n".join(lines))
+
+
+# ------------------------------------------------------------------
+# /pulse — momentum detector signals
+# ------------------------------------------------------------------
+
+@router.message(Command("pulse"))
+async def cmd_pulse(message: Message):
+    """Show active momentum signals from the Pulse detector."""
+    try:
+        from bot.services.pulse_detector import get_active_signals
+        signals = get_active_signals()
+    except Exception as e:
+        await message.answer(f"Error: {e}")
+        return
+
+    if not signals:
+        await message.answer(
+            "<b>Pulse Momentum Detector</b>\n\n"
+            "No active signals right now.\n"
+            "Signals are detected automatically every 60s.\n\n"
+            "<i>Types: FIRST_JUMP, CONTRIB_EXPLOSION, "
+            "IMMEDIATE_MOVER, NEW_ENTRY_DEEP, DEEP_CLIMBER</i>"
+        )
+        return
+
+    lines = [f"<b>Pulse — {len(signals)} Active Signal(s)</b>\n"]
+    for s in signals[:10]:
+        tier = s.get("tier", "?")
+        symbol = s.get("symbol", "?")
+        confidence = s.get("confidence", 0)
+        direction = s.get("direction", "?")
+        oi_change = s.get("oi_change_pct", 0)
+        vol_ratio = s.get("volume_ratio", 0)
+
+        dir_emoji = "\U0001f7e2" if direction == "LONG" else "\U0001f534" if direction == "SHORT" else "\u26aa"
+        lines.append(
+            f"{dir_emoji} <b>{symbol}</b> — {tier}\n"
+            f"   Confidence: {confidence} | Direction: {direction}\n"
+            f"   OI: {oi_change:+.1f}% | Vol: {vol_ratio:.1f}x avg"
+        )
+
+    lines.append("\n<i>Auto-scanning every 60s</i>")
+    await message.answer("\n".join(lines))
+
+
+# ------------------------------------------------------------------
+# /radar — opportunity scanner
+# ------------------------------------------------------------------
+
+@router.message(Command("radar"))
+async def cmd_radar(message: Message):
+    """Show latest Radar scan results."""
+    try:
+        from bot.services.radar_scanner import get_latest_scan
+        results = get_latest_scan()
+    except Exception as e:
+        await message.answer(f"Error: {e}")
+        return
+
+    if not results:
+        await message.answer(
+            "<b>Radar Opportunity Scanner</b>\n\n"
+            "No scan data yet. Radar runs every 15 minutes.\n\n"
+            "<i>Scores assets 0-400 on: market structure, "
+            "technicals, funding, BTC macro</i>"
+        )
+        return
+
+    lines = ["<b>Radar — Latest Scan</b>\n"]
+    for i, r in enumerate(results[:10], 1):
+        symbol = r.get("symbol", "?")
+        score = r.get("score", 0)
+        direction = r.get("direction", "?")
+        price = r.get("price", 0)
+        funding = r.get("funding", 0)
+        oi_change = r.get("oi_change_pct", 0)
+        rsi = r.get("rsi", 50)
+
+        dir_emoji = "\U0001f7e2" if direction == "LONG" else "\U0001f534" if direction == "SHORT" else "\u26aa"
+        score_bar = "\U0001f525" if score >= 300 else "\u26a1" if score >= 200 else "\u2022"
+
+        lines.append(
+            f"{score_bar} {dir_emoji} <b>{symbol}</b> — {direction} (Score: {score}/400)\n"
+            f"   Price: ${price:,.2f} | OI: {oi_change:+.1f}%\n"
+            f"   Funding: {funding*100:+.4f}%/hr | RSI: {rsi:.0f}"
+        )
+
+    total = r.get("total_scanned", len(results)) if results else 0
+    lines.append(f"\n<i>Scanned {total} assets | Next scan in ~15 min</i>")
+    await message.answer("\n".join(lines))

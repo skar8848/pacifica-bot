@@ -51,6 +51,8 @@ async def on_startup(bot: Bot):
     from bot.services.grid_engine import start_grid_engine
     from bot.services.funding_arb import start_funding_arb
     from bot.services.gap_monitor import start_gap_monitor
+    from bot.services.pulse_detector import start_pulse_detector
+    from bot.services.radar_scanner import start_radar_scanner
 
     asyncio.create_task(start_copy_engine(bot))
     asyncio.create_task(start_gas_monitor(bot))
@@ -67,6 +69,8 @@ async def on_startup(bot: Bot):
     asyncio.create_task(start_grid_engine(bot))
     asyncio.create_task(start_funding_arb(bot))
     asyncio.create_task(start_gap_monitor(bot))
+    asyncio.create_task(start_pulse_detector(bot))
+    asyncio.create_task(start_radar_scanner(bot))
     logger.info("Background services started.")
 
 
@@ -89,6 +93,8 @@ async def on_shutdown(bot: Bot):
     from bot.services.grid_engine import stop_grid_engine
     from bot.services.funding_arb import stop_funding_arb
     from bot.services.gap_monitor import stop_gap_monitor
+    from bot.services.pulse_detector import stop_pulse_detector
+    from bot.services.radar_scanner import stop_radar_scanner
 
     stop_copy_engine()
     stop_gas_monitor()
@@ -105,6 +111,8 @@ async def on_shutdown(bot: Bot):
     stop_grid_engine()
     stop_funding_arb()
     stop_gap_monitor()
+    stop_pulse_detector()
+    stop_radar_scanner()
     await close_market_data()
     await close_db()
 
