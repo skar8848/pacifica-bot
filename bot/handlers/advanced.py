@@ -71,8 +71,7 @@ async def cmd_calc(message: Message):
 
     try:
         symbol = parts[1].upper()
-        if not symbol.endswith("-PERP"):
-            symbol += "-PERP"
+        symbol = symbol.replace("-PERP", "")
         entry = float(parts[2])
         sl = float(parts[3])
         risk_pct = float(parts[4])
@@ -151,7 +150,7 @@ async def cmd_calc(message: Message):
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(
-                text=f"{'Long' if is_long else 'Short'} {symbol.replace('-PERP', '')} {leverage_needed}x",
+                text=f"{'Long' if is_long else 'Short'} {symbol} {leverage_needed}x",
                 callback_data=f"trade:{'long' if is_long else 'short'}:{symbol}",
             ),
         ],
@@ -171,9 +170,7 @@ async def cmd_funding(message: Message):
     parts = (message.text or "").split()
     specific = None
     if len(parts) > 1:
-        specific = parts[1].upper()
-        if not specific.endswith("-PERP"):
-            specific += "-PERP"
+        specific = parts[1].upper().replace("-PERP", "")
 
     rates = await get_all_funding_rates()
     if not rates:
@@ -259,9 +256,7 @@ async def cmd_trailing_stop(message: Message):
         await message.answer(text)
         return
 
-    symbol = parts[1].upper()
-    if not symbol.endswith("-PERP"):
-        symbol += "-PERP"
+    symbol = parts[1].upper().replace("-PERP", "")
 
     try:
         trail_pct = float(parts[2])
@@ -379,8 +374,7 @@ async def cmd_dca(message: Message):
 
     try:
         symbol = parts[1].upper()
-        if not symbol.endswith("-PERP"):
-            symbol += "-PERP"
+        symbol = symbol.replace("-PERP", "")
         side = parts[2].lower()
         if side not in ("long", "short"):
             raise ValueError("Side must be long or short")
@@ -486,8 +480,7 @@ async def cmd_scale(message: Message):
 
     try:
         symbol = parts[1].upper()
-        if not symbol.endswith("-PERP"):
-            symbol += "-PERP"
+        symbol = symbol.replace("-PERP", "")
         side = parts[2].lower()
         total = float(parts[3])
         price_low = float(parts[4])
@@ -697,8 +690,7 @@ async def cmd_twap(message: Message):
 
     try:
         symbol = parts[1].upper()
-        if not symbol.endswith("-PERP"):
-            symbol += "-PERP"
+        symbol = symbol.replace("-PERP", "")
         side = parts[2].lower()
         if side not in ("long", "short"):
             raise ValueError("Side must be long or short")
@@ -903,8 +895,7 @@ async def cmd_grid(message: Message):
         return
 
     symbol = parts[1].upper()
-    if not symbol.endswith("-PERP"):
-        symbol += "-PERP"
+    symbol = symbol.replace("-PERP", "")
     try:
         price_low = float(parts[2])
         price_high = float(parts[3])
