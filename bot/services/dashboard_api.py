@@ -919,6 +919,55 @@ async def api_markets(request: web.Request) -> web.Response:
 
 
 # ---------------------------------------------------------------------------
+# 15-18. Intel endpoints (macro signals, ETF flows, stablecoins)
+# ---------------------------------------------------------------------------
+
+
+async def api_intel_macro(request: web.Request) -> web.Response:
+    """Macro signals: BTC technicals, Fear & Greed, DXY, VIX, macro regime."""
+    try:
+        from bot.services.macro_intel import get_macro_signals
+        data = await get_macro_signals()
+        return _json(data)
+    except Exception as exc:
+        logger.error("api_intel_macro error: %s", exc)
+        return _json({"error": str(exc)}, status=500)
+
+
+async def api_intel_etf(request: web.Request) -> web.Response:
+    """BTC ETF flow estimates."""
+    try:
+        from bot.services.macro_intel import get_etf_flows
+        data = await get_etf_flows()
+        return _json(data)
+    except Exception as exc:
+        logger.error("api_intel_etf error: %s", exc)
+        return _json({"error": str(exc)}, status=500)
+
+
+async def api_intel_stablecoins(request: web.Request) -> web.Response:
+    """Stablecoin health & peg status."""
+    try:
+        from bot.services.macro_intel import get_stablecoin_health
+        data = await get_stablecoin_health()
+        return _json(data)
+    except Exception as exc:
+        logger.error("api_intel_stablecoins error: %s", exc)
+        return _json({"error": str(exc)}, status=500)
+
+
+async def api_intel_full(request: web.Request) -> web.Response:
+    """All intel in one call (macro + ETF + stablecoins)."""
+    try:
+        from bot.services.macro_intel import get_full_intel
+        data = await get_full_intel()
+        return _json(data)
+    except Exception as exc:
+        logger.error("api_intel_full error: %s", exc)
+        return _json({"error": str(exc)}, status=500)
+
+
+# ---------------------------------------------------------------------------
 # CORS pre-flight handler
 # ---------------------------------------------------------------------------
 
@@ -973,6 +1022,12 @@ def register_dashboard_routes(app: web.Application):
     app.router.add_get("/api/strategies", api_strategies)
     app.router.add_get("/api/reconciliation", api_reconciliation)
     app.router.add_get("/api/markets", api_markets)
+
+    # Intel endpoints
+    app.router.add_get("/api/intel/macro", api_intel_macro)
+    app.router.add_get("/api/intel/etf", api_intel_etf)
+    app.router.add_get("/api/intel/stablecoins", api_intel_stablecoins)
+    app.router.add_get("/api/intel/full", api_intel_full)
 
     # OPTIONS pre-flight for all /api/* paths
     app.router.add_route("OPTIONS", "/api/{path_info:.*}", cors_preflight)
