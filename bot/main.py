@@ -53,6 +53,11 @@ async def on_startup(bot: Bot):
     from bot.services.gap_monitor import start_gap_monitor
     from bot.services.pulse_detector import start_pulse_detector
     from bot.services.radar_scanner import start_radar_scanner
+    from bot.services.regime_classifier import start_regime_classifier
+    from bot.services.risk_guardian import start_risk_guardian
+    from bot.services.mean_reversion import start_mean_reversion
+    from bot.services.bracket_orders import start_bracket_engine
+    from bot.services.reconciliation import start_reconciliation_service
 
     asyncio.create_task(start_copy_engine(bot))
     asyncio.create_task(start_gas_monitor(bot))
@@ -71,7 +76,12 @@ async def on_startup(bot: Bot):
     asyncio.create_task(start_gap_monitor(bot))
     asyncio.create_task(start_pulse_detector(bot))
     asyncio.create_task(start_radar_scanner(bot))
-    logger.info("Background services started.")
+    asyncio.create_task(start_regime_classifier(bot))
+    asyncio.create_task(start_risk_guardian(bot))
+    asyncio.create_task(start_mean_reversion(bot))
+    asyncio.create_task(start_bracket_engine(bot))
+    asyncio.create_task(start_reconciliation_service(bot))
+    logger.info("Background services started (22 services).")
 
 
 async def on_shutdown(bot: Bot):
@@ -95,6 +105,11 @@ async def on_shutdown(bot: Bot):
     from bot.services.gap_monitor import stop_gap_monitor
     from bot.services.pulse_detector import stop_pulse_detector
     from bot.services.radar_scanner import stop_radar_scanner
+    from bot.services.regime_classifier import stop_regime_classifier
+    from bot.services.risk_guardian import stop_risk_guardian
+    from bot.services.mean_reversion import stop_mean_reversion
+    from bot.services.bracket_orders import stop_bracket_engine
+    from bot.services.reconciliation import stop_reconciliation_service
 
     stop_copy_engine()
     stop_gas_monitor()
@@ -113,6 +128,11 @@ async def on_shutdown(bot: Bot):
     stop_gap_monitor()
     stop_pulse_detector()
     stop_radar_scanner()
+    stop_regime_classifier()
+    stop_risk_guardian()
+    stop_mean_reversion()
+    stop_bracket_engine()
+    stop_reconciliation_service()
     await close_market_data()
     await close_db()
 
@@ -129,6 +149,10 @@ async def run_health_server():
     # Register Telegram Mini App routes
     from bot.services.miniapp import register_miniapp_routes
     register_miniapp_routes(app)
+
+    # Register Dashboard API routes
+    from bot.services.dashboard_api import register_dashboard_routes
+    register_dashboard_routes(app)
     port = int(os.environ.get("PORT", 10000))
     runner = web.AppRunner(app)
     await runner.setup()

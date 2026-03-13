@@ -1169,3 +1169,270 @@ async def cmd_radar(message: Message):
     total = r.get("total_scanned", len(results)) if results else 0
     lines.append(f"\n<i>Scanned {total} assets | Next scan in ~15 min</i>")
     await message.answer("\n".join(lines))
+
+
+# ------------------------------------------------------------------
+# /regime — volatility regime status
+# ------------------------------------------------------------------
+
+@router.message(Command("regime"))
+async def cmd_regime(message: Message):
+    """Show current volatility regime."""
+    from bot.services.regime_classifier import get_regime
+
+    r = get_regime()
+    regime = r["regime"]
+    sigma = r["sigma"]
+    mult = r["multiplier"]
+    dd = r["drawdown_pct"]
+    dd_amp = r["drawdown_amp"]
+
+    regime_emoji = {
+        "CALM": "\U0001f7e2", "NORMAL": "\U0001f7e1",
+        "HIGH": "\U0001f7e0", "EXTREME": "\U0001f534",
+    }
+    emoji = regime_emoji.get(regime, "\u26aa")
+
+    text = (
+        f"<b>Volatility Regime</b>\n\n"
+        f"{emoji} <b>{regime}</b> (multiplier {mult}x)\n\n"
+        f"Annualized vol: {sigma*100:.1f}%\n"
+        f"Drawdown: {dd:.2f}%\n"
+        f"Drawdown amplifier: {dd_amp}x\n\n"
+        f"<i>CALM &lt;15% | NORMAL 15-40% | HIGH 40-80% | EXTREME &gt;80%</i>"
+    )
+    await message.answer(text)
+
+
+# ------------------------------------------------------------------
+# /risk — risk guardian gate status
+# ------------------------------------------------------------------
+
+@router.message(Command("risk"))
+async def cmd_risk(message: Message):
+    """Show risk guardian gate state."""
+    from bot.services.risk_guardian import get_gate_state, can_enter, can_exit
+
+    s = get_gate_state()
+    state = s["state"]
+
+    state_emoji = {"OPEN": "\U0001f7e2", "COOLDOWN": "\U0001f7e1", "CLOSED": "\U0001f534"}
+    emoji = state_emoji.get(state, "\u26aa")
+
+    lines = [
+        f"<b>Risk Guardian</b>\n",
+        f"{emoji} State: <b>{state}</b>",
+        f"Reason: {s['reason']}",
+        f"Consecutive losses: {s['consecutive_losses']}",
+        f"Daily P&amp;L: ${s['daily_pnl']:.2f} / -${s['daily_limit']:.0f} limit",
+        f"Can enter: {'Yes' if can_enter() else 'No'}",
+        f"Can exit: {'Yes' if can_exit() else 'No'}",
+    ]
+
+    if s.get("cooldown_expires"):
+        import time
+        remaining = max(0, s["cooldown_expires"] - time.time())
+        lines.append(f"Cooldown expires in: {int(remaining)}s")
+
+    lines.append("\n<i>OPEN → COOLDOWN (2 losses) → CLOSED (loss in cooldown)</i>")
+    await message.answer("\n".join(lines))
+
+
+# ------------------------------------------------------------------
+# /exposure — portfolio correlation & exposure
+# ------------------------------------------------------------------
+
+@router.message(Command("exposure"))
+async def cmd_exposure(message: Message):
+    """Show portfolio exposure and correlation groups."""
+    user = await get_user(message.from_user.id)
+    if not user or not user.get("agent_wallet_encrypted"):
+        await message.answer("No wallet linked. Use /start to set up.")
+        return
+
+    from bot.services.wallet_manager import decrypt_private_key
+    from bot.services.pacifica_client import PacificaClient
+    from bot.services.portfolio_risk import get_portfolio_exposure, get_correlation_groups
+
+    try:
+        kp = decrypt_private_key(user["agent_wallet_encrypted"])
+        client = PacificaClient(
+            account=user["pacifica_account"], keypair=kp,
+            agent_wallet=user.get("agent_wallet_public"),
+        )
+        positions = await client.get_positions()
+        await client.close()
+    except Exception as e:
+        await message.answer(f"Error: {e}")
+        return
+
+    if not positions:
+        await message.answer(
+            "<b>Portfolio Exposure</b>\n\nNo open positions.\n\n"
+            f"<i>Correlation groups: {', '.join(get_correlation_groups().keys())}</i>"
+        )
+        return
+
+    exp = get_portfolio_exposure(positions)
+    lines = ["<b>Portfolio Exposure</b>\n"]
+
+    for group, info in exp.get("groups", {}).items():
+        limit_tag = " (AT LIMIT)" if info.get("at_limit") else ""
+        lines.append(f"  <b>{group}</b>: {', '.join(info['symbols'])} ({info['count']}/2){limit_tag}")
+
+    d = exp.get("direction", {})
+    lines.append(f"\nDirection: {d.get('long', 0)} long / {d.get('short', 0)} short")
+    lines.append(f"Total positions: {exp.get('position_count', 0)}")
+
+    await message.answer("\n".join(lines))
+
+
+# ------------------------------------------------------------------
+# /reflect — REFLECT self-improvement report
+# ------------------------------------------------------------------
+
+@router.message(Command("reflect"))
+async def cmd_reflect(message: Message):
+    """Generate REFLECT performance analysis."""
+    parts = (message.text or "").split()
+    period = parts[1] if len(parts) > 1 else "24h"
+    if period not in ("24h", "7d", "30d", "all"):
+        period = "24h"
+
+    await message.answer(f"Generating REFLECT report ({period})...")
+
+    try:
+        from bot.services.reflect_engine import generate_report, format_report_text
+        report = await generate_report(message.from_user.id, period)
+        text = format_report_text(report)
+        await message.answer(text)
+    except Exception as e:
+        await message.answer(f"Error generating report: {e}")
+
+
+# ------------------------------------------------------------------
+# /journal — trade journal
+# ------------------------------------------------------------------
+
+@router.message(Command("journal"))
+async def cmd_journal(message: Message):
+    """View trade journal or daily review."""
+    parts = (message.text or "").split()
+    subcmd = parts[1].lower() if len(parts) > 1 else "list"
+
+    try:
+        if subcmd == "review":
+            from bot.services.trade_journal import get_daily_review, format_daily_review
+            review = await get_daily_review(message.from_user.id)
+            text = format_daily_review(review)
+            await message.answer(text)
+        else:
+            from bot.services.trade_journal import get_journal, format_journal_entry
+            entries = await get_journal(message.from_user.id, limit=10)
+            if not entries:
+                await message.answer(
+                    "<b>Trade Journal</b>\n\nNo entries yet.\n"
+                    "Entries are created when positions close."
+                )
+                return
+
+            lines = [f"<b>Trade Journal — Last {len(entries)} entries</b>\n"]
+            for e in entries:
+                lines.append(format_journal_entry(e))
+                lines.append("")
+
+            await message.answer("\n".join(lines))
+    except Exception as e:
+        await message.answer(f"Error: {e}")
+
+
+# ------------------------------------------------------------------
+# /bracket — bracket order (entry + TP + SL)
+# ------------------------------------------------------------------
+
+@router.message(Command("bracket"))
+async def cmd_bracket(message: Message):
+    """
+    /bracket SYMBOL SIDE SIZE_USD ENTRY TP SL
+    e.g. /bracket SOL long 50 85 92 82
+    Entry=0 for market entry.
+    """
+    parts = (message.text or "").split()
+    if len(parts) < 7:
+        await message.answer(
+            "<b>Bracket Order</b>\n\n"
+            "<code>/bracket SYMBOL SIDE SIZE_USD ENTRY TP SL</code>\n\n"
+            "Example: <code>/bracket SOL long 50 85 92 82</code>\n"
+            "Use ENTRY=0 for market entry."
+        )
+        return
+
+    try:
+        symbol = parts[1].upper().replace("-PERP", "")
+        side = parts[2].lower()
+        size_usd = float(parts[3])
+        entry = float(parts[4])
+        tp = float(parts[5])
+        sl = float(parts[6])
+
+        if side not in ("long", "short"):
+            raise ValueError("Side must be long or short")
+
+        from bot.services.bracket_orders import create_bracket
+        oid = await create_bracket(
+            message.from_user.id, symbol, side, size_usd,
+            entry if entry > 0 else None, tp, sl,
+        )
+
+        entry_text = f"${entry:,.2f}" if entry > 0 else "Market"
+        await message.answer(
+            f"<b>Bracket Order Created</b> (#{oid})\n\n"
+            f"Symbol: {symbol} {side.upper()}\n"
+            f"Size: ${size_usd:,.0f}\n"
+            f"Entry: {entry_text}\n"
+            f"Take Profit: ${tp:,.2f}\n"
+            f"Stop Loss: ${sl:,.2f}\n\n"
+            f"<i>Monitoring every 10s</i>"
+        )
+    except Exception as e:
+        await message.answer(f"Error: {e}")
+
+
+# ------------------------------------------------------------------
+# /recon — reconciliation check
+# ------------------------------------------------------------------
+
+@router.message(Command("recon"))
+async def cmd_recon(message: Message):
+    """Run position reconciliation check."""
+    try:
+        from bot.services.reconciliation import run_reconciliation
+        result = await run_reconciliation(message.from_user.id)
+
+        lines = ["<b>Position Reconciliation</b>\n"]
+
+        matched = result.get("matched", [])
+        orphan_int = result.get("orphan_internal", [])
+        orphan_ext = result.get("orphan_exchange", [])
+        mismatches = result.get("mismatches", [])
+
+        lines.append(f"Matched: {len(matched)}")
+        if orphan_int:
+            lines.append(f"\n\u26a0\ufe0f Orphan internal ({len(orphan_int)}):")
+            for o in orphan_int:
+                lines.append(f"  {o}")
+        if orphan_ext:
+            lines.append(f"\n\u2139\ufe0f Untracked on exchange ({len(orphan_ext)}):")
+            for o in orphan_ext:
+                lines.append(f"  {o.get('symbol', '?')} {o.get('side', '?')} {o.get('amount', '?')}")
+        if mismatches:
+            lines.append(f"\n\u26a0\ufe0f Size mismatches ({len(mismatches)}):")
+            for m in mismatches:
+                lines.append(f"  {m}")
+
+        if not orphan_int and not orphan_ext and not mismatches:
+            lines.append("\n\u2705 All positions in sync!")
+
+        await message.answer("\n".join(lines))
+    except Exception as e:
+        await message.answer(f"Error: {e}")
