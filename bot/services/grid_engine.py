@@ -274,8 +274,6 @@ async def _place_initial_orders(bot: Bot, grid: dict, client: PacificaClient):
             # Level is at current price — skip (ambiguous)
             continue
 
-        tick_level = _price_to_tick_level(level, tick_size)
-
         try:
             # Recalculate token amount for this specific level price
             level_token_amount = usd_to_token(amount_usd, level, lot_size)
@@ -286,7 +284,7 @@ async def _place_initial_orders(bot: Bot, grid: dict, client: PacificaClient):
                 symbol=symbol,
                 side=side,
                 amount=level_token_amount,
-                tick_level=tick_level,
+                price=str(level),
             )
 
             order_id = result.get("order_id") if isinstance(result, dict) else None
@@ -418,7 +416,6 @@ async def _handle_fills(
             # Only place if that level isn't already tracked
             if new_idx not in filled:
                 new_price = levels[new_level_i]
-                tick_level = _price_to_tick_level(new_price, tick_size)
 
                 try:
                     new_token_amount = usd_to_token(amount_usd, new_price, lot_size)
@@ -429,7 +426,7 @@ async def _handle_fills(
                         symbol=symbol,
                         side=new_side,
                         amount=new_token_amount,
-                        tick_level=tick_level,
+                        price=str(new_price),
                     )
 
                     order_id = result.get("order_id") if isinstance(result, dict) else None

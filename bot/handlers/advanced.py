@@ -521,14 +521,13 @@ async def cmd_scale(message: Message):
                 continue
 
             order_side = "buy" if side == "long" else "sell"
-            tick_level = int(round(price / float(tick_size))) if float(tick_size) > 0 else int(price)
 
             try:
                 await client.create_limit_order(
                     symbol=symbol,
                     side=order_side,
                     amount=token_amount,
-                    tick_level=tick_level,
+                    price=str(price),
                 )
                 placed += 1
                 order_lines.append(f"  ${price:,.2f} — {token_amount} tokens (${amount_per_level:,.0f})")

@@ -708,21 +708,13 @@ async def cb_exec_limit(callback: CallbackQuery):
     lot_size = await _get_lot_size(symbol)
     token_amount = _usdc_to_token(notional, price_f, lot_size)
 
-    # Convert price to tick level (tick_level = price in integer form)
-    # Pacifica uses tick levels — we need market info to properly convert
-    try:
-        max_lev, tick_size, _ = await _get_market_info(symbol)
-        tick_level = int(round(price_f / float(tick_size)))
-    except Exception:
-        tick_level = int(price_f)  # fallback
-
     try:
         client = build_client_from_user(user)
         resp = await client.create_limit_order(
             symbol=symbol,
             side=side,
             amount=token_amount,
-            tick_level=tick_level,
+            price=str(price_f),
         )
         await client.close()
 

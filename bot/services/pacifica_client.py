@@ -98,7 +98,7 @@ class PacificaClient:
         url = f"{PACIFICA_REST_URL}{endpoint}"
         logger.debug("POST %s", url)
         async with session.post(url, json=body) as resp:
-            raw = await resp.json()
+            raw = await self._parse_response(resp)
             if resp.status >= 400 and not isinstance(raw, dict):
                 raise PacificaAPIError(resp.status, raw)
             return self._unwrap(raw)
@@ -108,14 +108,39 @@ class PacificaClient:
         url = f"{PACIFICA_REST_URL}{endpoint}"
         logger.debug("GET %s %s", url, params)
         async with session.get(url, params=params) as resp:
-            raw = await resp.json()
+            raw = await self._parse_response(resp)
             if resp.status >= 400 and not isinstance(raw, dict):
                 raise PacificaAPIError(resp.status, raw)
             return self._unwrap(raw)
 
+    @staticmethod
+    async def _parse_response(resp) -> Any:
+        """Parse response, handling text/plain error bodies from Pacifica."""
+        ct = resp.content_type or ""
+        if "json" in ct:
+            return await resp.json()
+        text = await resp.text()
+        try:
+            import json
+            return json.loads(text)
+        except (json.JSONDecodeError, ValueError):
+            if resp.status >= 400:
+                raise PacificaAPIError(resp.status, text)
+            return text
+
     # ------------------------------------------------------------------
     # Order creation (all include builder_code automatically)
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _normalize_side(side: str) -> str:
+        """Convert long/short/buy/sell to bid/ask for Pacifica API."""
+        s = side.lower()
+        if s in ("long", "buy", "bid"):
+            return "bid"
+        if s in ("short", "sell", "ask"):
+            return "ask"
+        return s
 
     async def create_market_order(
         self,
@@ -129,7 +154,7 @@ class PacificaClient:
         header = self._make_header("create_market_order")
         payload: dict[str, Any] = {
             "symbol": symbol,
-            "side": side,
+            "side": self._normalize_side(side),
             "amount": amount,
             "slippage_percent": slippage,
             "reduce_only": reduce_only,
@@ -144,7 +169,7 @@ class PacificaClient:
         symbol: str,
         side: str,
         amount: str,
-        tick_level: int,
+        price: str | int | float,
         tif: str = "gtc",
         reduce_only: bool = False,
         client_order_id: str | None = None,
@@ -152,9 +177,9 @@ class PacificaClient:
         header = self._make_header("create_order")
         payload: dict[str, Any] = {
             "symbol": symbol,
-            "side": side,
+            "side": self._normalize_side(side),
             "amount": amount,
-            "tick_level": tick_level,
+            "price": str(price),
             "tif": tif,
             "reduce_only": reduce_only,
             "client_order_id": client_order_id or str(uuid.uuid4()),
@@ -176,7 +201,7 @@ class PacificaClient:
         header = self._make_header("create_stop_order")
         payload: dict[str, Any] = {
             "symbol": symbol,
-            "side": side,
+            "side": self._normalize_side(side),
             "amount": amount,
             "stop_price": stop_price,
             "reduce_only": reduce_only,
@@ -225,7 +250,10 @@ class PacificaClient:
 
     async def cancel_all_orders(self, symbol: str | None = None) -> dict:
         header = self._make_header("cancel_all_orders")
-        payload: dict[str, Any] = {}
+        payload: dict[str, Any] = {
+            "all_symbols": symbol is None,
+            "exclude_reduce_only": False,
+        }
         if symbol:
             payload["symbol"] = symbol
         return await self._post("/orders/cancel_all", self._build_request(header, payload))
