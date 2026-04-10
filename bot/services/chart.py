@@ -91,7 +91,18 @@ async def generate_chart(
 
     title = f"{symbol}  ${last_close:,.2f}  ({sign}{change_pct:.2f}%)"
 
-    # Render to PNG buffer
+    # Render in a thread to avoid blocking the event loop
+    import asyncio
+    return await asyncio.to_thread(
+        _render_chart, df, style, title, width, height
+    )
+
+
+def _render_chart(df, style, title: str, width: int, height: int) -> bytes:
+    """Synchronous chart rendering (runs in thread)."""
+    import mplfinance as mpf
+    import matplotlib.pyplot as plt
+
     buf = io.BytesIO()
     dpi = 100
     fig_w = width / dpi
@@ -108,12 +119,8 @@ async def generate_chart(
         tight_layout=True,
     )
 
-    # Style title
     axes[0].set_title(title, color="white", fontsize=14, fontweight="bold", loc="left")
-
     fig.savefig(buf, format="png", dpi=dpi, bbox_inches="tight", facecolor="#0D1117")
-    buf.seek(0)
-    data = buf.read()
-    import matplotlib.pyplot as plt
     plt.close(fig)
-    return data
+    buf.seek(0)
+    return buf.read()

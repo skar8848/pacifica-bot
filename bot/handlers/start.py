@@ -1229,23 +1229,27 @@ async def cmd_clear(message: Message, state: FSMContext):
     from database.db import delete_user
     await delete_user(tg_id)
 
-    # Delete recent messages in the chat (bot + user messages in private chat)
-    import asyncio
-    current_msg_id = message.message_id
-    deleted = 0
-    for msg_id in range(current_msg_id, max(current_msg_id - 200, 0), -1):
-        try:
-            await message.bot.delete_message(chat_id, msg_id)
-            deleted += 1
-        except Exception:
-            pass  # Message already deleted or too old
-        # Small delay to avoid rate limiting
-        if deleted % 30 == 0 and deleted > 0:
-            await asyncio.sleep(0.5)
-
+    # Respond immediately so the bot doesn't appear stuck
     await message.answer(
-        f"<b>Chat cleared.</b>\n\nTap /start to set up again.",
+        "<b>Chat cleared.</b>\n\nTap /start to set up again.",
     )
+
+    # Delete recent messages in background (non-blocking)
+    import asyncio
+    asyncio.create_task(_clear_chat_messages(message.bot, chat_id, message.message_id))
+
+
+async def _clear_chat_messages(bot, chat_id: int, up_to_msg_id: int):
+    """Delete recent messages in background. Stops early after consecutive failures."""
+    fails = 0
+    for msg_id in range(up_to_msg_id, max(up_to_msg_id - 100, 0), -1):
+        try:
+            await bot.delete_message(chat_id, msg_id)
+            fails = 0
+        except Exception:
+            fails += 1
+            if fails >= 10:
+                break  # past the bot's reachable messages
 
 
 # ------------------------------------------------------------------
