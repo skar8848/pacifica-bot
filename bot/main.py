@@ -161,12 +161,28 @@ async def run_health_server():
     logger.info("Health server running on port %d", port)
 
 
+async def _keep_alive():
+    """Self-ping every 13 min to prevent Render free tier from sleeping."""
+    import aiohttp
+    port = int(os.environ.get("PORT", 10000))
+    url = f"http://localhost:{port}/health"
+    while True:
+        await asyncio.sleep(780)  # 13 minutes
+        try:
+            async with aiohttp.ClientSession() as s:
+                async with s.get(url, timeout=aiohttp.ClientTimeout(total=5)):
+                    pass
+        except Exception:
+            pass
+
+
 async def main():
     if not TELEGRAM_BOT_TOKEN:
         raise RuntimeError("TELEGRAM_BOT_TOKEN not set in .env")
 
     # Start health check server for Render
     await run_health_server()
+    asyncio.create_task(_keep_alive())
 
     bot = Bot(
         token=TELEGRAM_BOT_TOKEN,
