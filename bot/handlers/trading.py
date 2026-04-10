@@ -433,10 +433,27 @@ async def cb_execute_trade(callback: CallbackQuery):
             reply_markup=main_menu_kb(),
         )
     except PacificaAPIError as e:
+        hint = _trade_error_hint(str(e))
         await callback.message.edit_text(  # type: ignore
-            f"<b>❌ Order Failed</b>\n\n{e}",
+            f"<b>❌ Order Failed</b>\n\n{e}{hint}",
             reply_markup=market_detail_kb(symbol),
         )
+
+
+def _trade_error_hint(err: str) -> str:
+    """Return a helpful hint based on the Pacifica error message."""
+    low = err.lower()
+    if "insufficient" in low or "balance" in low or "margin" in low:
+        return (
+            "\n\n💡 <b>You need to deposit first:</b>\n"
+            "1. Send USDC (Solana) to your wallet\n"
+            "2. Tap 💳 Wallet → Deposit"
+        )
+    if "not found" in low or "no account" in low or "does not exist" in low:
+        return "\n\n💡 Your Pacifica account may not be activated yet. Deposit USDC to get started."
+    if "invalid" in low and "signature" in low:
+        return "\n\n💡 Signing error — try /clear and reimport your wallet."
+    return ""
 
 
 # ------------------------------------------------------------------
@@ -508,8 +525,9 @@ async def cb_exec_trade_with_tpsl(callback: CallbackQuery, state: FSMContext):
             f"(or type <code>skip</code> to skip)",
         )
     except PacificaAPIError as e:
+        hint = _trade_error_hint(str(e))
         await callback.message.edit_text(  # type: ignore
-            f"<b>❌ Order Failed</b>\n\n{e}",
+            f"<b>❌ Order Failed</b>\n\n{e}{hint}",
             reply_markup=market_detail_kb(symbol),
         )
 
@@ -734,8 +752,9 @@ async def cb_exec_limit(callback: CallbackQuery):
             reply_markup=main_menu_kb(),
         )
     except PacificaAPIError as e:
+        hint = _trade_error_hint(str(e))
         await callback.message.edit_text(  # type: ignore
-            f"<b>❌ Limit Order Failed</b>\n\n{e}",
+            f"<b>❌ Limit Order Failed</b>\n\n{e}{hint}",
             reply_markup=market_detail_kb(symbol),
         )
 

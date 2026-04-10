@@ -87,6 +87,12 @@ async def cmd_start(message: Message, state: FSMContext):
         await state.update_data(ref_code=ref_code)
 
     if user and user.get("pacifica_account"):
+        # Apply referral for existing users clicking a ref link (if no referrer yet)
+        if ref_code and not user.get("referred_by"):
+            referrer = await get_user_by_ref_code(ref_code)
+            if referrer and referrer["telegram_id"] != tg_id:
+                await update_user(tg_id, referred_by=referrer["telegram_id"])
+
         # Existing user without username — prompt to set one
         if not user.get("username"):
             await state.set_state(OnboardUsernameStates.waiting_username)
@@ -102,22 +108,34 @@ async def cmd_start(message: Message, state: FSMContext):
         display_name = user.get("username") or message.from_user.first_name or "trader"
         # Quick account summary
         summary = ""
+        deposit_hint = ""
         try:
             from bot.models.user import build_client_from_user
             client = build_client_from_user(user)
             try:
                 info = await client.get_account_info()
-                bal = info.get("balance", "0")
-                equity = info.get("account_equity", "0")
+                bal = float(info.get("balance", 0) or 0)
+                equity = float(info.get("account_equity", 0) or 0)
                 positions = await client.get_positions()
                 pos_count = len(positions)
                 summary = (
-                    f"\nBalance: <b>${bal}</b>\n"
-                    f"Equity: ${equity}\n"
+                    f"\nBalance: <b>${bal:,.2f}</b>\n"
+                    f"Equity: ${equity:,.2f}\n"
                     f"Open positions: {pos_count}\n"
                 )
+                if bal < 1 and equity < 1:
+                    deposit_hint = (
+                        "\n⚠️ <b>No funds detected.</b> To start trading:\n"
+                        f"1. Send USDC (Solana) to your wallet\n"
+                        f"2. Tap 💳 Wallet → Deposit\n"
+                        f"3. Or deposit directly on <a href=\"{APP_URL}\">Pacifica</a>\n"
+                    )
             except Exception:
-                pass
+                deposit_hint = (
+                    "\n⚠️ <b>Could not connect to Pacifica.</b>\n"
+                    f"Deposit USDC via <a href=\"{APP_URL}\">Pacifica</a> "
+                    f"using your wallet address above.\n"
+                )
             finally:
                 await client.close()
         except Exception:
@@ -133,8 +151,9 @@ async def cmd_start(message: Message, state: FSMContext):
         await message.answer(
             f"Hey <b>{display_name}</b>, what do you want to trade?\n\n"
             f"Wallet: <code>{wallet[:8]}...{wallet[-4:]}</code>"
-            f"{summary}{referred_line}",
+            f"{summary}{referred_line}{deposit_hint}",
             reply_markup=main_menu_kb(),
+            disable_web_page_preview=True,
         )
         return
 
@@ -389,7 +408,11 @@ async def msg_onboard_username(message: Message, state: FSMContext):
         )
     else:
         setup_note = (
-            "\n\nSend SOL to your wallet for tx fees, then deposit USDC on Pacifica to start trading."
+            "\n\n<b>To start trading:</b>\n"
+            "1. Send <b>USDC</b> (Solana) to your wallet address above\n"
+            "2. Tap 💳 <b>Wallet → Deposit</b> to move USDC into Pacifica\n"
+            "3. You're ready to trade!\n\n"
+            "You also need a small amount of <b>SOL</b> (~0.01) for transaction fees."
         )
 
     ref_link = f"https://t.me/{BOT_USERNAME}?start=ref_{raw}"
@@ -1240,16 +1263,25 @@ async def cmd_clear(message: Message, state: FSMContext):
 
 
 async def _clear_chat_messages(bot, chat_id: int, up_to_msg_id: int):
-    """Delete recent messages in background. Stops early after consecutive failures."""
+    """Delete all reachable messages in background.
+
+    Telegram bots can only delete messages < 48h old. We scan up to 1000
+    message IDs back and stop after 50 consecutive failures (gap = no
+    more bot messages).
+    """
+    import asyncio
     fails = 0
-    for msg_id in range(up_to_msg_id, max(up_to_msg_id - 100, 0), -1):
+    for msg_id in range(up_to_msg_id, max(up_to_msg_id - 1000, 0), -1):
         try:
             await bot.delete_message(chat_id, msg_id)
             fails = 0
         except Exception:
             fails += 1
-            if fails >= 10:
-                break  # past the bot's reachable messages
+            if fails >= 50:
+                break
+        # Respect rate limits
+        if (up_to_msg_id - msg_id) % 25 == 0:
+            await asyncio.sleep(0.3)
 
 
 # ------------------------------------------------------------------
