@@ -142,7 +142,7 @@ async def discover_whales() -> list[str]:
                 added = await add_hl_wallet(addr, auto=True)
                 if added:
                     new_whales.append(addr)
-                    logger.info("Auto-discovered HL whale: %s ($%,.0f)", addr, av)
+                    logger.info("Auto-discovered HL whale: %s ($%.0f)", addr, av)
         except Exception:
             pass
 
