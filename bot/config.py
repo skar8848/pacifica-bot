@@ -38,7 +38,8 @@ ENCRYPTION_KEY = os.getenv("ENCRYPTION_KEY", "")
 SOLANA_RPC_URL = os.getenv("SOLANA_RPC_URL", "https://api.mainnet-beta.solana.com")
 
 # --- Database ---
-DATABASE_PATH = os.getenv("DATABASE_PATH", "database/pacifica_bot.db")
+DATABASE_URL = os.getenv("DATABASE_URL", "")  # PostgreSQL connection string (required on Render)
+DATABASE_PATH = os.getenv("DATABASE_PATH", "database/pacifica_bot.db")  # SQLite fallback (local dev)
 
 # --- Pacifica access ---
 PACIFICA_REFERRAL_CODE = os.getenv("PACIFICA_REFERRAL_CODE", "Pacifica")
