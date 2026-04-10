@@ -489,19 +489,35 @@ async def create_user(
 
 async def delete_user(telegram_id: int):
     pool = await get_raw_pool()
+    # Tables to clean — includes service-created tables that may not exist yet
+    tables = [
+        ("price_alerts", "telegram_id"),
+        ("trade_log", "telegram_id"),
+        ("copy_configs", "telegram_id"),
+        ("trailing_stops", "telegram_id"),
+        ("dca_configs", "telegram_id"),
+        ("scaled_orders", "telegram_id"),
+        ("twap_orders", "telegram_id"),
+        ("onchain_watches", "telegram_id"),
+        ("follower_pnl", "follower_id"),
+        ("leader_profiles", "telegram_id"),
+        ("referral_fees", "referrer_id"),
+        ("grid_configs", "telegram_id"),
+        ("arb_positions", "telegram_id"),
+        ("mean_reversion_configs", "telegram_id"),
+        ("mean_reversion_positions", "telegram_id"),
+        ("managed_orders", "telegram_id"),
+        ("journal_entries", "telegram_id"),
+        ("tracked_wallets", "telegram_id"),
+        ("whale_alert_settings", "telegram_id"),
+    ]
     async with pool.acquire() as conn:
-        async with conn.transaction():
-            await conn.execute("DELETE FROM price_alerts WHERE telegram_id = $1", telegram_id)
-            await conn.execute("DELETE FROM trade_log WHERE telegram_id = $1", telegram_id)
-            await conn.execute("DELETE FROM copy_configs WHERE telegram_id = $1", telegram_id)
-            await conn.execute("DELETE FROM trailing_stops WHERE telegram_id = $1", telegram_id)
-            await conn.execute("DELETE FROM dca_configs WHERE telegram_id = $1", telegram_id)
-            await conn.execute("DELETE FROM scaled_orders WHERE telegram_id = $1", telegram_id)
-            await conn.execute("DELETE FROM twap_orders WHERE telegram_id = $1", telegram_id)
-            await conn.execute("DELETE FROM onchain_watches WHERE telegram_id = $1", telegram_id)
-            await conn.execute("DELETE FROM follower_pnl WHERE follower_id = $1", telegram_id)
-            await conn.execute("DELETE FROM leader_profiles WHERE telegram_id = $1", telegram_id)
-            await conn.execute("DELETE FROM users WHERE telegram_id = $1", telegram_id)
+        for table, col in tables:
+            try:
+                await conn.execute(f"DELETE FROM {table} WHERE {col} = $1", telegram_id)
+            except Exception:
+                pass  # table may not exist yet
+        await conn.execute("DELETE FROM users WHERE telegram_id = $1", telegram_id)
 
 
 async def get_user_by_wallet(wallet: str, exclude_tg_id: int | None = None) -> dict | None:
