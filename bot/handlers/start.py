@@ -17,6 +17,7 @@ from database.db import (
     get_user_settings, set_user_setting,
     get_active_alerts, add_price_alert, delete_alert,
     get_referral_stats, claim_referral_fees, is_username_taken,
+    reserve_username,
     REFERRAL_FEE_SHARE, REFEREE_FEE_REBATE,
 )
 from bot.services.wallet_manager import generate_wallet, import_wallet
@@ -398,6 +399,7 @@ async def msg_onboard_username(message: Message, state: FSMContext):
         return
 
     await update_user(tg_id, username=raw)
+    await reserve_username(raw, tg_id)
 
     # Generate referral code based on username
     await get_or_create_ref_code(tg_id)
@@ -518,7 +520,10 @@ async def cmd_username(message: Message, state: FSMContext):
         return
 
     old_name = user.get("username", "")
+    if old_name:
+        await reserve_username(old_name, tg_id)
     await update_user(tg_id, username=raw)
+    await reserve_username(raw, tg_id)
 
     ref_link = f"https://t.me/{BOT_USERNAME}?start=ref_{raw}"
     await message.answer(
@@ -1165,7 +1170,12 @@ async def msg_set_username(message: Message, state: FSMContext):
         )
         return
 
+    user = await get_user(tg_id)
+    old_name = user.get("username", "") if user else ""
+    if old_name:
+        await reserve_username(old_name, tg_id)
     await update_user(tg_id, username=raw)
+    await reserve_username(raw, tg_id)
     await state.clear()
     await message.answer(
         f"<b>✅ Username set!</b>\n\n"

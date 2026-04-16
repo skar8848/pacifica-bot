@@ -37,6 +37,7 @@ class MockDB:
         self.users: dict[int, dict] = {}          # telegram_id -> user dict
         self.trade_log: list[dict] = []
         self.referral_fees: list[dict] = []
+        self.reserved_usernames: dict[str, int] = {}  # lower_name -> telegram_id
         self.price_alerts: list[dict] = []
         self._alert_seq = 1
 
@@ -99,12 +100,21 @@ class MockDB:
 
     async def is_username_taken(self, username: str, exclude_tg_id: int | None = None) -> bool:
         lower = username.lower()
+        # Check reserved
+        if lower in self.reserved_usernames:
+            owner = self.reserved_usernames[lower]
+            if exclude_tg_id and owner == exclude_tg_id:
+                return False
+            return True
         for u in self.users.values():
             if (u.get("username") or "").lower() == lower:
                 if exclude_tg_id and u["telegram_id"] == exclude_tg_id:
                     continue
                 return True
         return False
+
+    async def reserve_username(self, username: str, telegram_id: int):
+        self.reserved_usernames[username.lower()] = telegram_id
 
     # -- settings ------------------------------------------------------------
 
@@ -254,6 +264,7 @@ def patch_db(mock_db):
         "get_user_by_ref_code": mock_db.get_user_by_ref_code,
         "count_referrals": mock_db.count_referrals,
         "is_username_taken": mock_db.is_username_taken,
+        "reserve_username": mock_db.reserve_username,
         "get_user_settings": mock_db.get_user_settings,
         "set_user_setting": mock_db.set_user_setting,
         "log_trade": mock_db.log_trade,

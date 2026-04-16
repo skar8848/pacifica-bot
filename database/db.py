@@ -442,6 +442,13 @@ async def _init_tables():
         CREATE TABLE IF NOT EXISTS bot_settings (
             key TEXT PRIMARY KEY,
             value TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS reserved_usernames (
+            username_lower TEXT PRIMARY KEY,
+            original_username TEXT NOT NULL,
+            telegram_id BIGINT NOT NULL,
+            reserved_at TIMESTAMPTZ DEFAULT NOW()
         )
     """)
     logger.info("Database tables initialised.")
@@ -489,6 +496,10 @@ async def create_user(
 
 async def delete_user(telegram_id: int):
     pool = await get_raw_pool()
+    # Reserve the username before deletion so nobody else can take it
+    user = await get_user(telegram_id)
+    if user and user.get("username"):
+        await reserve_username(user["username"], telegram_id)
     # Tables to clean — includes service-created tables that may not exist yet
     tables = [
         ("price_alerts", "telegram_id"),
@@ -681,8 +692,26 @@ async def get_user_by_ref_code(code: str) -> dict | None:
 
 
 async def is_username_taken(username: str, exclude_tg_id: int | None = None) -> bool:
+    """Check if username is taken by another active user OR permanently reserved."""
     pool = await get_raw_pool()
     lower = username.lower()
+
+    # Check reserved usernames (burned forever)
+    reserved = await pool.fetchrow(
+        "SELECT 1 FROM reserved_usernames WHERE username_lower = $1", lower
+    )
+    if reserved:
+        # Allow the original owner to reclaim their own reserved name
+        if exclude_tg_id:
+            own = await pool.fetchrow(
+                "SELECT 1 FROM reserved_usernames WHERE username_lower = $1 AND telegram_id = $2",
+                lower, exclude_tg_id,
+            )
+            if own:
+                return False
+        return True
+
+    # Check active users
     if exclude_tg_id:
         row = await pool.fetchrow(
             "SELECT 1 FROM users WHERE LOWER(username) = $1 AND telegram_id != $2",
@@ -693,6 +722,20 @@ async def is_username_taken(username: str, exclude_tg_id: int | None = None) -> 
             "SELECT 1 FROM users WHERE LOWER(username) = $1", lower
         )
     return row is not None
+
+
+async def reserve_username(username: str, telegram_id: int):
+    """Permanently reserve a username so nobody else can take it."""
+    pool = await get_raw_pool()
+    try:
+        await pool.execute(
+            """INSERT INTO reserved_usernames (username_lower, original_username, telegram_id)
+               VALUES ($1, $2, $3)
+               ON CONFLICT (username_lower) DO NOTHING""",
+            username.lower(), username, telegram_id,
+        )
+    except Exception:
+        pass
 
 
 # ------------------------------------------------------------------
