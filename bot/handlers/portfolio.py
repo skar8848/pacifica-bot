@@ -81,20 +81,64 @@ async def cmd_orders(message: Message):
 
 @router.message(Command("balance"))
 async def cmd_balance(message: Message):
+    """Quick balance overview: SOL, USDC wallet, Pacifica account, equity, positions."""
     user = await _require_linked_user(message)
     if not user:
         return
 
+    import asyncio
+    from bot.services.solana_client import get_sol_balance, get_usdc_balance
+    from bot.services.pacifica_client import PacificaAPIError
+
+    wallet = user["pacifica_account"]
+
+    # Fetch on-chain balances + Pacifica account info in parallel
+    sol_bal = 0.0
+    usdc_bal = 0.0
+    try:
+        sol_bal, usdc_bal = await asyncio.gather(
+            get_sol_balance(wallet),
+            get_usdc_balance(wallet),
+        )
+    except Exception:
+        pass
+
+    pac_balance = "—"
+    equity = "—"
+    available = "—"
+    positions_count = 0
+    margin_used = "—"
+
     client = build_client_from_user(user)
     try:
         info = await client.get_account_info()
-    except Exception as e:
-        await message.answer(f"Error: {e}", reply_markup=back_to_menu_kb())
-        return
+        pac_balance = info.get("balance", "—")
+        equity = info.get("account_equity", "—")
+        available = info.get("available_to_spend", "—")
+        margin_used = info.get("total_margin_used", "—")
+        positions_count = info.get("positions_count", 0)
+    except PacificaAPIError as e:
+        if "not found" in str(e).lower():
+            pac_balance = "0 (not deposited)"
+        else:
+            pac_balance = f"Error: {e}"
+    except Exception:
+        pass
     finally:
         await client.close()
 
-    await message.answer(fmt_balance(info), reply_markup=main_menu_kb())
+    text = (
+        "<b>💰 Quick Balance</b>\n\n"
+        f"  SOL: <b>{sol_bal:.4f} SOL</b>\n"
+        f"  USDC (wallet): <b>${usdc_bal:,.2f}</b>\n"
+        f"  USDC (Pacifica): <b>${pac_balance}</b>\n\n"
+        f"  Equity: <b>${equity}</b>\n"
+        f"  Available: ${available}\n"
+        f"  Margin used: ${margin_used}\n\n"
+        f"  Open positions: <b>{positions_count}</b>"
+    )
+
+    await message.answer(text, reply_markup=main_menu_kb())
 
 
 @router.message(Command("pnl"))
