@@ -233,10 +233,16 @@ async def _replicate_open(
             if amount is None:
                 continue
 
-            from database.db import get_user_settings
-            settings = await get_user_settings(tg_id)
-            slippage = settings.get("slippage", "3")
-            await client.create_market_order(symbol=symbol, side=side, amount=amount, slippage=slippage)
+            # Try with increasing slippage until the order goes through
+            for slip in ("5", "15", "50"):
+                try:
+                    await client.create_market_order(symbol=symbol, side=side, amount=amount, slippage=slip)
+                    break
+                except Exception as e:
+                    if "price too far" in str(e).lower() and slip != "50":
+                        logger.debug("Copy %s: slippage %s%% too tight, retrying higher", symbol, slip)
+                        continue
+                    raise
 
             await log_trade(
                 tg_id, symbol, side, amount,
@@ -313,12 +319,16 @@ async def _replicate_close(
             if float(amount) <= 0:
                 continue
 
-            from database.db import get_user_settings
-            settings = await get_user_settings(tg_id)
-            slippage = settings.get("slippage", "3")
-            await client.create_market_order(
-                symbol=symbol, side=close_side, amount=amount, reduce_only=True, slippage=slippage,
-            )
+            for slip in ("5", "15", "50"):
+                try:
+                    await client.create_market_order(
+                        symbol=symbol, side=close_side, amount=amount, reduce_only=True, slippage=slip,
+                    )
+                    break
+                except Exception as e:
+                    if "price too far" in str(e).lower() and slip != "50":
+                        continue
+                    raise
 
             await log_trade(
                 tg_id, symbol, close_side, amount,
