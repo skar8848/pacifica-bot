@@ -541,12 +541,20 @@ async def cb_exec_trade_with_tpsl(callback: CallbackQuery, state: FSMContext):
 
         direction = "🟢 LONG" if side == "bid" else "🔴 SHORT"
         price_display = fill_price or str(price)
+        current = float(price_display) if price_display else 0
+
+        if side == "bid":
+            tp_hint = f"above ${current:,.2f}" if current else "above entry"
+        else:
+            tp_hint = f"below ${current:,.2f}" if current else "below entry"
+
         await callback.message.edit_text(  # type: ignore
             f"<b>✅ Order Executed!</b>\n\n"
             f"{direction} <b>{symbol}</b> @ ${price_display}\n"
             f"Size: ${usdc_amount} USDC | {leverage}x\n\n"
-            f"Now set your <b>Take Profit</b> price:\n"
-            f"(or type <code>skip</code> to skip)",
+            f"Set your <b>Take Profit</b> price ({tp_hint}):\n"
+            f"Example: <code>{current * 1.05:,.2f}</code>\n\n"
+            f"Type <code>skip</code> to skip",
         )
     except PacificaAPIError as e:
         hint = _trade_error_hint(str(e))
@@ -564,11 +572,21 @@ async def msg_auto_tp(message: Message, state: FSMContext):
     side = data["tpsl_side"]
 
     if raw.lower() in ("skip", "s", "0", "no"):
+        fill = data.get("tpsl_fill_price", "")
+        current = float(fill) if fill else 0
+        if side in ("bid", "buy", "long"):
+            sl_hint = f"below ${current:,.2f}" if current else "below entry"
+            sl_example = f"{current * 0.95:,.2f}" if current else ""
+        else:
+            sl_hint = f"above ${current:,.2f}" if current else "above entry"
+            sl_example = f"{current * 1.05:,.2f}" if current else ""
+
         await state.set_state(TradeStates.waiting_auto_sl)
         await message.answer(
             f"<b>TP skipped.</b>\n\n"
-            f"Now set your <b>Stop Loss</b> price for {symbol}:\n"
-            f"(or type <code>skip</code> to skip)",
+            f"Set your <b>Stop Loss</b> price for {symbol} ({sl_hint}):\n"
+            f"{f'Example: <code>{sl_example}</code>' if sl_example else ''}\n"
+            f"Type <code>skip</code> to skip",
         )
         return
 
@@ -592,11 +610,21 @@ async def msg_auto_tp(message: Message, state: FSMContext):
         logger.error("TP set failed: %s", e)
         await message.answer(f"TP failed: {e}")
 
+    fill = data.get("tpsl_fill_price", "")
+    current = float(fill) if fill else 0
+    if side in ("bid", "buy", "long"):
+        sl_hint = f"below ${current:,.2f}" if current else "below entry"
+        sl_example = f"{current * 0.95:,.2f}" if current else ""
+    else:
+        sl_hint = f"above ${current:,.2f}" if current else "above entry"
+        sl_example = f"{current * 1.05:,.2f}" if current else ""
+
     await state.set_state(TradeStates.waiting_auto_sl)
     await message.answer(
         f"<b>✅ TP set @ ${tp_price}</b>\n\n"
-        f"Now set your <b>Stop Loss</b> price for {symbol}:\n"
-        f"(or type <code>skip</code> to skip)",
+        f"Set your <b>Stop Loss</b> price for {symbol} ({sl_hint}):\n"
+        f"{f'Example: <code>{sl_example}</code>' if sl_example else ''}\n"
+        f"Type <code>skip</code> to skip",
     )
 
 
