@@ -160,7 +160,7 @@ async def cmd_start(message: Message, state: FSMContext):
     # New or incomplete user — show wallet setup
     await message.answer(
         f"<b>{BOT_NAME}</b> — Trade perps on Pacifica from Telegram.\n\n"
-        f"Import your Solana wallet or generate a new one:",
+        f"Create a new wallet to get started:",
         reply_markup=onboarding_kb(),
     )
 
