@@ -79,19 +79,25 @@ async def _check_all_positions(bot: Bot):
 
 async def _check_position(bot: Bot, tg_id: int, pos: dict, username: str | None = None):
     symbol = pos.get("symbol", "")
-    liq_price = float(pos.get("liquidation_price", 0))
-    entry_price = float(pos.get("entry_price", 0))
+    liq_price = float(pos.get("liquidation_price", 0) or 0)
+    entry_price = float(pos.get("entry_price", 0) or 0)
     side = pos.get("side", "")
 
-    if not liq_price or not entry_price or not symbol:
+    if not entry_price or not symbol or not side:
+        return
+
+    # Skip absurd liquidation prices (negative, zero, or very far from entry)
+    if liq_price <= 0:
         return
 
     current_price = await get_price(symbol)
     if not current_price:
         return
 
+    is_long = side.lower() in ("long", "buy", "bid")
+
     # Calculate distance to liquidation as percentage
-    if side.lower() in ("long", "buy"):
+    if is_long:
         if current_price <= liq_price:
             distance_pct = 0
         else:
