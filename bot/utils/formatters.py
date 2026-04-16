@@ -214,20 +214,19 @@ def fmt_leaderboard(traders: list) -> str:
     if not traders:
         return "No leaderboard data."
 
-    text = "<b>🏆 Top Traders</b>\n\n"
+    # Sort by all-time PnL (descending)
+    traders = sorted(traders, key=lambda t: float(t.get("pnl_all_time", 0)), reverse=True)
+
+    text = "<b>🏆 Top Traders (by PnL)</b>\n\n"
     for i, t in enumerate(traders[:10], 1):
         addr = t.get("address", "?")
         pnl_all = float(t.get("pnl_all_time", 0))
         equity = float(t.get("equity_current", 0))
-        vol_30d = float(t.get("volume_30d", 0))
-        name = t.get("username") or f"{addr[:6]}...{addr[-4:]}"
-
+        emoji = "🟢" if pnl_all >= 0 else "🔴"
         pnl_sign = "+" if pnl_all >= 0 else ""
         short = f"{addr[:6]}...{addr[-4:]}"
         text += (
-            f"<b>{i}.</b> {short}\n"
-            f"   <code>{addr}</code>\n"
-            f"   PnL: {pnl_sign}{pnl_all:,.0f} | Equity: ${equity:,.0f}\n"
-            f"   Vol 30d: ${vol_30d:,.0f}\n\n"
+            f"{emoji} <b>{i}.</b> {short}\n"
+            f"   PnL: <b>{pnl_sign}${pnl_all:,.0f}</b> | Equity: ${equity:,.0f}\n\n"
         )
     return text

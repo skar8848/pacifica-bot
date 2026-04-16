@@ -162,18 +162,27 @@ async def run_health_server():
 
 
 async def _keep_alive():
-    """Self-ping every 13 min to prevent Render free tier from sleeping."""
+    """Self-ping every 13 min to prevent Render free tier from sleeping.
+
+    Render only counts EXTERNAL HTTP requests as activity.
+    RENDER_EXTERNAL_URL is auto-set by Render (e.g. https://xxx.onrender.com).
+    """
     import aiohttp
-    port = int(os.environ.get("PORT", 10000))
-    url = f"http://localhost:{port}/health"
+    external_url = os.environ.get("RENDER_EXTERNAL_URL", "")
+    if not external_url:
+        logger.warning("RENDER_EXTERNAL_URL not set — keep-alive disabled")
+        return
+    url = f"{external_url}/health"
+    logger.info("Keep-alive will ping %s every 13 min", url)
     while True:
-        await asyncio.sleep(780)  # 13 minutes
+        await asyncio.sleep(780)
         try:
             async with aiohttp.ClientSession() as s:
-                async with s.get(url, timeout=aiohttp.ClientTimeout(total=5)):
+                async with s.get(url, timeout=aiohttp.ClientTimeout(total=10)):
                     pass
-        except Exception:
-            pass
+            logger.debug("Keep-alive ping OK")
+        except Exception as e:
+            logger.debug("Keep-alive ping failed: %s", e)
 
 
 async def main():

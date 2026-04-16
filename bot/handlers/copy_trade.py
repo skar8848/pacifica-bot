@@ -150,15 +150,14 @@ def _inspect_kb(wallet: str) -> InlineKeyboardMarkup:
 async def nav_leaderboard(callback: CallbackQuery):
     await callback.answer("Loading top traders...")
 
-    text = ""
+    traders = []
     try:
         client = await _get_client()
         traders = await client.get_leaderboard()
-        text = fmt_leaderboard(traders)
     except Exception:
         pass
 
-    if not text or text == "No leaderboard data.":
+    if not traders:
         from database.db import get_db
         db = await get_db()
         async with db.execute(
@@ -177,15 +176,35 @@ async def nav_leaderboard(callback: CallbackQuery):
         else:
             text = "<b>🏆 Top Traders</b>\n\nNo traders yet. Be the first!"
 
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="◀️ Copy Trading", callback_data="nav:copy"),
+             InlineKeyboardButton(text="◀️ Menu", callback_data="nav:menu")],
+        ])
+        await callback.message.edit_text(text, reply_markup=kb)  # type: ignore
+        return
+
+    text = fmt_leaderboard(traders)
     if len(text) > 4000:
         text = text[:4000] + "\n..."
 
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="◀️ Copy Trading", callback_data="nav:copy"),
-            InlineKeyboardButton(text="◀️ Menu", callback_data="nav:menu"),
-        ],
+    # Build per-trader copy buttons (top 5)
+    sorted_traders = sorted(traders, key=lambda t: float(t.get("pnl_all_time", 0)), reverse=True)
+    rows = []
+    for t in sorted_traders[:5]:
+        addr = t.get("address", "")
+        if not addr:
+            continue
+        short = f"{addr[:6]}...{addr[-4:]}"
+        rows.append([
+            InlineKeyboardButton(text=f"📋 Copy {short}", callback_data=f"copy:start:{addr}"),
+            InlineKeyboardButton(text=f"🔍 Inspect", callback_data=f"inspect:{addr}"),
+        ])
+    rows.append([
+        InlineKeyboardButton(text="◀️ Copy Trading", callback_data="nav:copy"),
+        InlineKeyboardButton(text="◀️ Menu", callback_data="nav:menu"),
     ])
+
+    kb = InlineKeyboardMarkup(inline_keyboard=rows)
     await callback.message.edit_text(text, reply_markup=kb)  # type: ignore
 
 
