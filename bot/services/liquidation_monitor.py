@@ -17,8 +17,8 @@ logger = logging.getLogger(__name__)
 _running = False
 CHECK_INTERVAL = 30  # seconds
 
-# Alert thresholds (% distance from liquidation)
-THRESHOLDS = [10, 5, 3]
+# Alert thresholds (% of margin lost)
+THRESHOLDS = [75, 85, 90]
 
 
 async def start_liquidation_monitor(bot: Bot):
@@ -79,15 +79,12 @@ async def _check_all_positions(bot: Bot):
 
 async def _check_position(bot: Bot, tg_id: int, pos: dict, username: str | None = None):
     symbol = pos.get("symbol", "")
-    liq_price = float(pos.get("liquidation_price", 0) or 0)
     entry_price = float(pos.get("entry_price", 0) or 0)
     side = pos.get("side", "")
+    amount = abs(float(pos.get("amount", pos.get("size", 0)) or 0))
+    margin = float(pos.get("margin", pos.get("initial_margin", 0)) or 0)
 
-    if not entry_price or not symbol or not side:
-        return
-
-    # Skip absurd liquidation prices (negative, zero, or very far from entry)
-    if liq_price <= 0:
+    if not entry_price or not symbol or not side or not amount or not margin:
         return
 
     current_price = await get_price(symbol)
@@ -96,55 +93,58 @@ async def _check_position(bot: Bot, tg_id: int, pos: dict, username: str | None 
 
     is_long = side.lower() in ("long", "buy", "bid")
 
-    # Calculate distance to liquidation as percentage
+    # Calculate unrealized PnL
     if is_long:
-        if current_price <= liq_price:
-            distance_pct = 0
-        else:
-            distance_pct = ((current_price - liq_price) / current_price) * 100
+        pnl = (current_price - entry_price) * amount
     else:
-        if current_price >= liq_price:
-            distance_pct = 0
-        else:
-            distance_pct = ((liq_price - current_price) / current_price) * 100
+        pnl = (entry_price - current_price) * amount
 
-    # Check thresholds (highest first)
+    # % of margin lost (0% = breakeven, 100% = total loss)
+    loss_pct = (-pnl / margin * 100) if margin > 0 else 0
+
+    if loss_pct < 0:
+        loss_pct = 0  # position is profitable, no alert needed
+
+    # Check thresholds (lowest first → alert escalation)
     key = (tg_id, symbol)
-    last_sent = _sent_alerts.get(key, 100)  # default: no alert sent
+    last_sent = _sent_alerts.get(key, 0)
 
     for threshold in THRESHOLDS:
-        if distance_pct <= threshold and last_sent > threshold:
+        if loss_pct >= threshold and last_sent < threshold:
             _sent_alerts[key] = threshold
-            await _send_liq_alert(bot, tg_id, symbol, side, current_price, liq_price, distance_pct, username)
+            await _send_liq_alert(bot, tg_id, symbol, side, current_price, entry_price, loss_pct, margin, pnl, username)
             break
 
-    # Reset if price moved away from liquidation
-    if distance_pct > THRESHOLDS[0] + 5:
+    # Reset if position recovered below first threshold
+    if loss_pct < THRESHOLDS[0] - 10:
         _sent_alerts.pop(key, None)
 
 
 async def _send_liq_alert(
     bot: Bot, tg_id: int, symbol: str, side: str,
-    current_price: float, liq_price: float, distance_pct: float,
+    current_price: float, entry_price: float, loss_pct: float,
+    margin: float, pnl: float,
     username: str | None = None,
 ):
-    severity = "CRITICAL" if distance_pct <= 3 else "WARNING"
-    emoji = "\U0001f6a8" if distance_pct <= 3 else "\u26a0\ufe0f"
+    severity = "CRITICAL" if loss_pct >= 90 else "WARNING"
+    emoji = "\U0001f6a8" if loss_pct >= 90 else "\u26a0\ufe0f"
+    direction = "LONG" if side.lower() in ("long", "buy", "bid") else "SHORT"
 
     text = (
-        f"<b>{emoji} Liquidation {severity}</b>\n\n"
-        f"<b>{symbol}</b> {side.upper()}\n"
+        f"<b>{emoji} {severity} — {loss_pct:.0f}% margin lost</b>\n\n"
+        f"<b>{symbol}</b> {direction}\n"
+        f"Entry: <code>${entry_price:,.2f}</code>\n"
         f"Current: <code>${current_price:,.2f}</code>\n"
-        f"Liq Price: <code>${liq_price:,.2f}</code>\n"
-        f"Distance: <b>{distance_pct:.1f}%</b>\n\n"
+        f"PnL: <code>${pnl:,.2f}</code>\n"
+        f"Margin: <code>${margin:,.2f}</code>\n\n"
     )
 
-    if distance_pct <= 3:
-        text += "Your position is extremely close to liquidation!"
-    elif distance_pct <= 5:
-        text += "Consider adding margin or reducing position size."
+    if loss_pct >= 90:
+        text += "You are about to lose your entire margin. Close now!"
+    elif loss_pct >= 85:
+        text += "Your position is in critical danger. Consider closing."
     else:
-        text += "Monitor your position closely."
+        text += "Your position is losing significant margin. Monitor closely."
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [
@@ -159,8 +159,8 @@ async def _send_liq_alert(
         logger.debug("Failed to send liq alert to %s: %s", tg_id, e)
 
     # Post to group feed
-    if username and distance_pct <= 5:
+    if username and loss_pct >= 85:
         from bot.services.group_feed import post_liquidation_alert
         await post_liquidation_alert(
-            bot, username, symbol, side, distance_pct, liq_price, current_price,
+            bot, username, symbol, side, loss_pct, entry_price, current_price,
         )
