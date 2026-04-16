@@ -6,7 +6,7 @@ import logging
 
 from aiogram import Router, F
 from aiogram.filters import Command
-from aiogram.types import Message, CallbackQuery
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
@@ -438,6 +438,14 @@ async def cb_execute_trade(callback: CallbackQuery):
 
         direction = "🟢 LONG" if side == "bid" else "🔴 SHORT"
         price_line = f"Fill price: <b>${fill_price}</b>\n" if fill_price else ""
+
+        from bot.config import PACIFICA_NETWORK
+        app_base = "https://app.pacifica.fi" if PACIFICA_NETWORK == "mainnet" else "https://test-app.pacifica.fi"
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📊 View on Pacifica", url=f"{app_base}/portfolio")],
+            *main_menu_kb().inline_keyboard,
+        ])
+
         await callback.message.edit_text(  # type: ignore
             f"<b>✅ Order Executed!</b>\n\n"
             f"{direction} <b>{symbol}</b>\n"
@@ -446,7 +454,7 @@ async def cb_execute_trade(callback: CallbackQuery):
             f"Notional: ${notional:,.0f}\n"
             f"{price_line}"
             f"Order ID: <code>{order_id}</code>",
-            reply_markup=main_menu_kb(),
+            reply_markup=kb,
         )
     except PacificaAPIError as e:
         hint = _trade_error_hint(str(e))
@@ -571,14 +579,17 @@ async def msg_auto_tp(message: Message, state: FSMContext):
         await message.answer("Invalid price. Enter a number or 'skip':")
         return
 
-    # Set TP
     tg_id = message.from_user.id  # type: ignore
     user = await get_user(tg_id)
     try:
         client = build_client_from_user(user)
-        await client.set_tpsl(symbol=symbol, side=side, take_profit={"stop_price": tp_price})
+        # Normalize side to bid/ask
+        normalized_side = "bid" if side.lower() in ("bid", "buy", "long") else "ask"
+        logger.info("Setting TP for %s side=%s stop_price=%s", symbol, normalized_side, tp_price)
+        await client.set_tpsl(symbol=symbol, side=normalized_side, take_profit={"stop_price": str(tp_price)})
         await client.close()
     except Exception as e:
+        logger.error("TP set failed: %s", e)
         await message.answer(f"TP failed: {e}")
 
     await state.set_state(TradeStates.waiting_auto_sl)
@@ -619,9 +630,11 @@ async def msg_auto_sl(message: Message, state: FSMContext):
     user = await get_user(tg_id)
     try:
         client = build_client_from_user(user)
-        await client.set_tpsl(symbol=symbol, side=side, stop_loss={"stop_price": sl_price})
+        normalized_side = "bid" if side.lower() in ("bid", "buy", "long") else "ask"
+        await client.set_tpsl(symbol=symbol, side=normalized_side, stop_loss={"stop_price": str(sl_price)})
         await client.close()
     except Exception as e:
+        logger.error("SL set failed: %s", e)
         await message.answer(f"SL failed: {e}", reply_markup=main_menu_kb())
         return
 
@@ -1373,6 +1386,16 @@ async def _quick_trade(message: Message, side: str):
 
         leverage_str = str(int(leverage)) if leverage == int(leverage) else str(leverage)
         price_line = f"Fill price: <b>${fill_price}</b>\n" if fill_price else ""
+
+        from bot.config import PACIFICA_NETWORK
+        app_base = "https://app.pacifica.fi" if PACIFICA_NETWORK == "mainnet" else "https://test-app.pacifica.fi"
+        portfolio_url = f"{app_base}/portfolio"
+
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📊 View on Pacifica", url=portfolio_url)],
+            *main_menu_kb().inline_keyboard,
+        ])
+
         await status_msg.edit_text(
             f"<b>✅ Order Executed!</b>\n\n"
             f"{direction} <b>{symbol}</b>\n"
@@ -1381,7 +1404,7 @@ async def _quick_trade(message: Message, side: str):
             f"Notional: ${notional:,.0f}\n"
             f"{price_line}"
             f"Order ID: <code>{order_id}</code>",
-            reply_markup=main_menu_kb(),
+            reply_markup=kb,
         )
     except PacificaAPIError as e:
         hint = _trade_error_hint(str(e))
