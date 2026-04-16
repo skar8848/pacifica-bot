@@ -112,14 +112,12 @@ def _fmt_top_traders(traders: list, sort_by: str = "pnl") -> str:
         short = f"{addr[:6]}...{addr[-4:]}"
         text += (
             f"<b>{i}.</b> {emoji} {short}\n"
-            f"   <code>{addr}</code>\n"
-            f"   {sort_label}: {val_str} | Equity: ${equity:,.0f}\n\n"
+            f"   {sort_label}: {val_str} | Equity: ${equity:,.0f}\n"
+            f"   /copy <code>{addr}</code>\n"
+            f"   /inspect <code>{addr}</code>\n\n"
         )
 
-    text += (
-        f"<i>Sort: /top pnl | /top pnl7d | /top volume | /top equity</i>\n"
-        f"<i>Tap address to copy, then /inspect &lt;wallet&gt;</i>"
-    )
+    text += f"<i>Sort: /top pnl | /top pnl7d | /top volume | /top equity</i>"
     return text
 
 
@@ -660,12 +658,91 @@ async def copy_start_callback(callback: CallbackQuery):
     if setup.get("min_trade_usd", 0) > 0:
         min_str = f" | Min trigger: ${setup['min_trade_usd']:.0f}"
 
+    # Check if master has open positions to offer mirroring
+    mirror_row = []
+    try:
+        client = await _get_client()
+        positions = await client.get_positions(setup["wallet"])
+        if positions:
+            n = len(positions)
+            mirror_row = [InlineKeyboardButton(
+                text=f"📋 Mirror {n} current position{'s' if n > 1 else ''}",
+                callback_data=f"copy_mirror:{setup['wallet']}",
+            )]
+    except Exception:
+        pass
+
+    rows = []
+    if mirror_row:
+        rows.append(mirror_row)
+    rows.append([
+        InlineKeyboardButton(text="◀️ Copy Trading", callback_data="nav:copy"),
+        InlineKeyboardButton(text="◀️ Menu", callback_data="nav:menu"),
+    ])
+
     await callback.message.edit_text(  # type: ignore
         f"<b>✅ Copy Active!</b>\n\n"
         f"Master: <code>{setup['wallet']}</code>\n"
         f"Size: {size_str} | Cap: ${setup['max_position_usd']:,.0f}{min_str}\n"
         f"Total exposure limit: ${setup.get('max_total_usd', 5000):,.0f}\n\n"
-        f"The bot will automatically mirror their trades.",
+        f"The bot will mirror their <b>new trades</b> from now on."
+        f"{f' The master has {len(positions)} open position(s) you can mirror.' if mirror_row else ''}",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+    )
+
+
+@router.callback_query(F.data.startswith("copy_mirror:"))
+async def cb_copy_mirror(callback: CallbackQuery):
+    """Mirror the master's current open positions."""
+    master_wallet = callback.data.split(":", 1)[1]  # type: ignore
+    tg_id = callback.from_user.id
+    await callback.answer("Mirroring positions...")
+
+    user = await get_user(tg_id)
+    if not user or not user.get("pacifica_account"):
+        return
+
+    configs = await get_active_copy_configs(tg_id)
+    cfg = next((c for c in configs if c["master_wallet"] == master_wallet), None)
+    if not cfg:
+        await callback.message.edit_text(  # type: ignore
+            "Copy config not found. Start copying first.",
+            reply_markup=copy_menu_kb(),
+        )
+        return
+
+    try:
+        client = await _get_client()
+        positions = await client.get_positions(master_wallet)
+    except Exception as e:
+        await callback.message.edit_text(  # type: ignore
+            f"Could not fetch master positions: {e}",
+            reply_markup=copy_menu_kb(),
+        )
+        return
+
+    if not positions:
+        await callback.message.edit_text(  # type: ignore
+            "Master has no open positions to mirror.",
+            reply_markup=copy_menu_kb(),
+        )
+        return
+
+    from bot.services.copy_engine import _replicate_open
+    opened = 0
+    errors = 0
+    for pos in positions:
+        try:
+            await _replicate_open(callback.bot, master_wallet, pos, [cfg])
+            opened += 1
+        except Exception as e:
+            logger.debug("Mirror position failed: %s", e)
+            errors += 1
+
+    error_line = f"\n{errors} failed" if errors else ""
+    await callback.message.edit_text(  # type: ignore
+        f"<b>✅ Mirrored {opened} position{'s' if opened != 1 else ''}</b>{error_line}\n\n"
+        f"⚠️ Entry prices may differ from the master's original entries.",
         reply_markup=copy_menu_kb(),
     )
 

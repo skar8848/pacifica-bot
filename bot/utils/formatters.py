@@ -227,6 +227,8 @@ def fmt_leaderboard(traders: list) -> str:
         short = f"{addr[:6]}...{addr[-4:]}"
         text += (
             f"{emoji} <b>{i}.</b> {short}\n"
-            f"   PnL: <b>{pnl_sign}${pnl_all:,.0f}</b> | Equity: ${equity:,.0f}\n\n"
+            f"   PnL: <b>{pnl_sign}${pnl_all:,.0f}</b> | Equity: ${equity:,.0f}\n"
+            f"   /copy <code>{addr}</code>\n"
+            f"   /inspect <code>{addr}</code>\n\n"
         )
     return text
