@@ -108,7 +108,14 @@ async def _check_master(bot: Bot, master_wallet: str, followers: list[dict]):
         if symbol:
             current[symbol] = pos
 
-    prev = _master_snapshots.get(master_wallet, {})
+    if master_wallet not in _master_snapshots:
+        # First poll for this master — save snapshot only, don't replicate.
+        # Existing positions are the baseline, not new trades.
+        _master_snapshots[master_wallet] = current
+        logger.info("Initial snapshot for master %s: %d positions", master_wallet, len(current))
+        return
+
+    prev = _master_snapshots[master_wallet]
     _master_snapshots[master_wallet] = current
 
     for symbol, pos in current.items():
