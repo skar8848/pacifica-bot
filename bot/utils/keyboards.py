@@ -141,26 +141,39 @@ def market_detail_kb(symbol: str) -> InlineKeyboardMarkup:
 # Trading flow (step by step via buttons)
 # ------------------------------------------------------------------
 
-def trade_amount_kb(symbol: str, side: str) -> InlineKeyboardMarkup:
-    """Quick USDC amount selection."""
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(text="$25", callback_data=f"amt:{side}:{symbol}:25"),
-                InlineKeyboardButton(text="$50", callback_data=f"amt:{side}:{symbol}:50"),
-                InlineKeyboardButton(text="$100", callback_data=f"amt:{side}:{symbol}:100"),
-            ],
-            [
-                InlineKeyboardButton(text="$250", callback_data=f"amt:{side}:{symbol}:250"),
-                InlineKeyboardButton(text="$500", callback_data=f"amt:{side}:{symbol}:500"),
-                InlineKeyboardButton(text="$1000", callback_data=f"amt:{side}:{symbol}:1000"),
-            ],
-            [
-                InlineKeyboardButton(text="Custom ✏️", callback_data=f"amt_custom:{side}:{symbol}"),
-                InlineKeyboardButton(text="◀️ Back", callback_data=f"market:{symbol}"),
-            ],
-        ]
-    )
+def trade_amount_kb(symbol: str, side: str, equity: float | None = None) -> InlineKeyboardMarkup:
+    """Quick USDC amount selection. Shows equity % buttons when equity is known."""
+    rows = []
+
+    if equity and equity >= 5:
+        pcts = [10, 25, 50]
+        pct_row = []
+        for p in pcts:
+            amt = int(equity * p / 100)
+            if amt >= 1:
+                pct_row.append(InlineKeyboardButton(
+                    text=f"{p}% (${amt})",
+                    callback_data=f"amt:{side}:{symbol}:{amt}",
+                ))
+        if pct_row:
+            rows.append(pct_row)
+
+    rows.append([
+        InlineKeyboardButton(text="$25", callback_data=f"amt:{side}:{symbol}:25"),
+        InlineKeyboardButton(text="$50", callback_data=f"amt:{side}:{symbol}:50"),
+        InlineKeyboardButton(text="$100", callback_data=f"amt:{side}:{symbol}:100"),
+    ])
+    rows.append([
+        InlineKeyboardButton(text="$250", callback_data=f"amt:{side}:{symbol}:250"),
+        InlineKeyboardButton(text="$500", callback_data=f"amt:{side}:{symbol}:500"),
+        InlineKeyboardButton(text="$1000", callback_data=f"amt:{side}:{symbol}:1000"),
+    ])
+    rows.append([
+        InlineKeyboardButton(text="Custom ✏️", callback_data=f"amt_custom:{side}:{symbol}"),
+        InlineKeyboardButton(text="◀️ Back", callback_data=f"market:{symbol}"),
+    ])
+
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def trade_leverage_kb(symbol: str, side: str, amount: str, max_lev: int = 50) -> InlineKeyboardMarkup:

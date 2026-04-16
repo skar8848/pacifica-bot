@@ -203,10 +203,26 @@ async def cb_trade_side(callback: CallbackQuery):
     price = await _get_price(symbol)
     price_str = f"\nCurrent price: ${price:,.2f}" if price else ""
 
+    # Fetch equity for contextual % buttons
+    equity = None
+    try:
+        user = await get_user(callback.from_user.id)
+        if user:
+            client = build_client_from_user(user)
+            try:
+                info = await client.get_account_info()
+                equity = float(info.get("account_equity", info.get("equity", 0)) or 0)
+            except Exception:
+                pass
+            finally:
+                await client.close()
+    except Exception:
+        pass
+
     await callback.message.edit_text(  # type: ignore
         f"<b>{direction} {symbol}</b>{price_str}\n\n"
         f"Select amount (USDC):",
-        reply_markup=trade_amount_kb(symbol, api_side),
+        reply_markup=trade_amount_kb(symbol, api_side, equity),
     )
 
 
@@ -1235,81 +1251,128 @@ async def msg_sl_price(message: Message, state: FSMContext):
 
 
 # ------------------------------------------------------------------
-# Quick command shortcuts (still work alongside buttons)
+# Quick trade shortcuts — execute immediately, no confirmation step
 # ------------------------------------------------------------------
 
-@router.message(Command("long"))
-async def cmd_long(message: Message):
+async def _quick_trade(message: Message, side: str):
+    """Shared logic for /long and /short instant execution.
+
+    ``side`` is "bid" (long) or "ask" (short).
+    Usage: /long SYMBOL AMOUNT [LEVERAGE]  — default leverage 1.
+    """
+    side_label = "long" if side == "bid" else "short"
+    direction = "🟢 LONG" if side == "bid" else "🔴 SHORT"
+
     args = (message.text or "").split()
     if len(args) < 3:
         await message.answer(
-            "Usage: /long <symbol> <$amount> [leverage]\n"
-            "Example: /long BTC 100 10x\n\nOr use the buttons!",
+            f"Usage: /{side_label} &lt;symbol&gt; &lt;amount_usdc&gt; [leverage]\n"
+            f"Example: /{side_label} BTC 50\n"
+            f"Example: /{side_label} ETH 100 5",
             reply_markup=main_menu_kb(),
         )
         return
 
     symbol = args[1].upper()
-    usdc = args[2].lstrip("$")
-    leverage = args[3].lower().rstrip("x") if len(args) > 3 else "1"
+    usdc_raw = args[2].lstrip("$").replace(",", "")
+    lev_raw = args[3].lower().rstrip("x") if len(args) > 3 else "1"
 
+    # Validate numbers
+    try:
+        usdc_amount = float(usdc_raw)
+        leverage = float(lev_raw)
+        if usdc_amount <= 0 or leverage <= 0:
+            raise ValueError
+    except (ValueError, TypeError):
+        await message.answer("Invalid amount or leverage. Use numbers > 0.", reply_markup=main_menu_kb())
+        return
+
+    tg_id = message.from_user.id  # type: ignore
+    user = await get_user(tg_id)
+    if not user or not user.get("pacifica_account"):
+        await message.answer(
+            "Link your account first!\nUse /start then /link <wallet>",
+            reply_markup=main_menu_kb(),
+        )
+        return
+
+    # Notify the user that the order is being sent
+    status_msg = await message.answer(f"{direction} {symbol} — ${usdc_raw} USDC @ {lev_raw}x — sending...")
+
+    # Auto-claim beta code + builder approval if needed
+    await ensure_beta_and_builder(user)
+
+    # Get price
     price = await _get_price(symbol)
-    notional = float(usdc) * float(leverage)
-    if price:
-        lot_size = await _get_lot_size(symbol)
-        token_amount = _usdc_to_token(notional, price, lot_size)
-        price_line = f"Price: ${price:,.2f}\nToken amount: ~{token_amount} {symbol}\n"
-    else:
-        price_line = ""
+    if not price:
+        await status_msg.edit_text(
+            f"<b>Could not fetch price for {symbol}.</b> Is it a valid market?",
+            reply_markup=main_menu_kb(),
+        )
+        return
 
-    await message.answer(
-        f"<b>Confirm Order</b>\n\n"
-        f"🟢 LONG <b>{symbol}</b>\n"
-        f"Size: ${usdc} USDC\n"
-        f"Leverage: {leverage}x\n"
-        f"Notional: ${notional:,.0f}\n"
-        f"{price_line}"
-        f"Type: Market\n"
-        f"Builder fee: 0.05%",
-        reply_markup=confirm_trade_kb("bid", symbol, usdc, leverage),
-    )
+    # Convert USDC to token amount
+    notional = usdc_amount * leverage
+    lot_size = await _get_lot_size(symbol)
+    token_amount = _usdc_to_token(notional, price, lot_size)
+
+    # User slippage
+    settings = await get_user_settings(tg_id)
+    slippage = settings.get("slippage", "0.5")
+
+    try:
+        client = build_client_from_user(user)
+        resp = await client.create_market_order(
+            symbol=symbol,
+            side=side,
+            amount=token_amount,
+            slippage=slippage,
+        )
+        await client.close()
+
+        logger.info("Quick %s order response: %s", side_label, resp)
+        order_id = resp.get("order_id", resp.get("id", "?"))
+        fill_price = resp.get("fill_price", resp.get("price", resp.get("avg_fill_price", "")))
+
+        await log_trade(tg_id, symbol, side, token_amount, str(fill_price), "market")
+        await _track_referral_fee(tg_id, symbol, notional)
+
+        leverage_str = str(int(leverage)) if leverage == int(leverage) else str(leverage)
+        price_line = f"Fill price: <b>${fill_price}</b>\n" if fill_price else ""
+        await status_msg.edit_text(
+            f"<b>✅ Order Executed!</b>\n\n"
+            f"{direction} <b>{symbol}</b>\n"
+            f"Size: ${usdc_raw} USDC ({token_amount} {symbol})\n"
+            f"Leverage: {leverage_str}x\n"
+            f"Notional: ${notional:,.0f}\n"
+            f"{price_line}"
+            f"Order ID: <code>{order_id}</code>",
+            reply_markup=main_menu_kb(),
+        )
+    except PacificaAPIError as e:
+        hint = _trade_error_hint(str(e))
+        await status_msg.edit_text(
+            f"<b>❌ Order Failed</b>\n\n{e}{hint}",
+            reply_markup=main_menu_kb(),
+        )
+    except Exception as e:
+        logger.exception("Quick trade error")
+        await status_msg.edit_text(
+            f"<b>❌ Unexpected Error</b>\n\n{e}",
+            reply_markup=main_menu_kb(),
+        )
+
+
+@router.message(Command("long"))
+async def cmd_long(message: Message):
+    """Instant long — /long SYMBOL AMOUNT [LEVERAGE]. No confirmation step."""
+    await _quick_trade(message, side="bid")
 
 
 @router.message(Command("short"))
 async def cmd_short(message: Message):
-    args = (message.text or "").split()
-    if len(args) < 3:
-        await message.answer(
-            "Usage: /short <symbol> <$amount> [leverage]\n"
-            "Example: /short ETH 200 20x\n\nOr use the buttons!",
-            reply_markup=main_menu_kb(),
-        )
-        return
-
-    symbol = args[1].upper()
-    usdc = args[2].lstrip("$")
-    leverage = args[3].lower().rstrip("x") if len(args) > 3 else "1"
-
-    price = await _get_price(symbol)
-    notional = float(usdc) * float(leverage)
-    if price:
-        lot_size = await _get_lot_size(symbol)
-        token_amount = _usdc_to_token(notional, price, lot_size)
-        price_line = f"Price: ${price:,.2f}\nToken amount: ~{token_amount} {symbol}\n"
-    else:
-        price_line = ""
-
-    await message.answer(
-        f"<b>Confirm Order</b>\n\n"
-        f"🔴 SHORT <b>{symbol}</b>\n"
-        f"Size: ${usdc} USDC\n"
-        f"Leverage: {leverage}x\n"
-        f"Notional: ${notional:,.0f}\n"
-        f"{price_line}"
-        f"Type: Market\n"
-        f"Builder fee: 0.05%",
-        reply_markup=confirm_trade_kb("ask", symbol, usdc, leverage),
-    )
+    """Instant short — /short SYMBOL AMOUNT [LEVERAGE]. No confirmation step."""
+    await _quick_trade(message, side="ask")
 
 
 @router.message(Command("close"))
