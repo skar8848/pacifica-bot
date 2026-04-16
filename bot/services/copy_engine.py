@@ -233,7 +233,10 @@ async def _replicate_open(
             if amount is None:
                 continue
 
-            await client.create_market_order(symbol=symbol, side=side, amount=amount)
+            from database.db import get_user_settings
+            settings = await get_user_settings(tg_id)
+            slippage = settings.get("slippage", "3")
+            await client.create_market_order(symbol=symbol, side=side, amount=amount, slippage=slippage)
 
             await log_trade(
                 tg_id, symbol, side, amount,
@@ -310,8 +313,11 @@ async def _replicate_close(
             if float(amount) <= 0:
                 continue
 
+            from database.db import get_user_settings
+            settings = await get_user_settings(tg_id)
+            slippage = settings.get("slippage", "3")
             await client.create_market_order(
-                symbol=symbol, side=close_side, amount=amount, reduce_only=True,
+                symbol=symbol, side=close_side, amount=amount, reduce_only=True, slippage=slippage,
             )
 
             await log_trade(
