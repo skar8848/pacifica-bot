@@ -264,14 +264,35 @@ async def _build_inspect_text(wallet: str) -> str:
     positions = await pos_task
     trades = await trades_task
 
-    equity = float(account.get("equity", 0))
-    balance = float(account.get("balance", 0))
-    margin_used = float(account.get("margin_used", 0))
-    unrealized_pnl = float(account.get("unrealized_pnl", 0))
+    equity = float(account.get("equity", 0) or 0)
+    balance = float(account.get("balance", 0) or 0)
+    margin_used = float(account.get("margin_used", 0) or 0)
+    unrealized_pnl = float(account.get("unrealized_pnl", 0) or 0)
     upnl_sign = "+" if unrealized_pnl >= 0 else ""
+
+    # Fetch leaderboard stats (PnL all-time, 7d, volume)
+    lb_line = ""
+    try:
+        lb_data = await client.get_leaderboard(limit=200)
+        trader = next((t for t in lb_data if t.get("address") == wallet), None)
+        if trader:
+            pnl_all = float(trader.get("pnl_all_time", 0) or 0)
+            pnl_7d = float(trader.get("pnl_7d", 0) or 0)
+            pnl_1d = float(trader.get("pnl_1d", 0) or 0)
+            vol = float(trader.get("volume_all_time", 0) or 0)
+            s = lambda v: f"+${v:,.0f}" if v >= 0 else f"-${abs(v):,.0f}"
+            e = lambda v: "🟢" if v >= 0 else "🔴"
+            lb_line = (
+                f"{e(pnl_all)} PnL All-time: <b>{s(pnl_all)}</b>\n"
+                f"{e(pnl_7d)} PnL 7d: {s(pnl_7d)} | 1d: {s(pnl_1d)}\n"
+                f"📊 Volume: ${vol:,.0f}\n\n"
+            )
+    except Exception:
+        pass
 
     text = (
         f"<b>🔍 Trader: <code>{wallet[:8]}...{wallet[-4:]}</code></b>\n\n"
+        f"{lb_line}"
         f"💰 Equity: <b>${equity:,.2f}</b>\n"
         f"💵 Balance: ${balance:,.2f}\n"
         f"📊 Margin used: ${margin_used:,.2f}\n"
