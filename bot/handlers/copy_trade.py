@@ -307,7 +307,19 @@ async def _build_inspect_text(wallet: str) -> str:
             price = float(t.get("price", 0))
             pnl = float(t.get("pnl", 0))
             pnl_str = f" | PnL: {'+'if pnl >= 0 else ''}{pnl:,.2f}" if pnl else ""
-            text += f"  {sym} {side} @${price:,.2f}{pnl_str}\n"
+            ts = t.get("timestamp", t.get("created_at", t.get("time", "")))
+            date_str = ""
+            if ts:
+                try:
+                    from datetime import datetime
+                    if isinstance(ts, (int, float)):
+                        dt = datetime.utcfromtimestamp(ts / 1000 if ts > 1e12 else ts)
+                    else:
+                        dt = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+                    date_str = f" | {dt.strftime('%d/%m %H:%M')}"
+                except Exception:
+                    pass
+            text += f"  {sym} {side} @${price:,.2f}{pnl_str}{date_str}\n"
 
     if len(text) > 4000:
         text = text[:4000] + "\n..."
