@@ -859,7 +859,15 @@ async def cb_share_pnl(callback: CallbackQuery):
     entry_price = float(pos.get("entry_price", 0))
     amount = abs(float(pos.get("amount", pos.get("size", 0))))
     side = pos.get("side", "bid")
-    leverage = pos.get("leverage", "?")
+    margin = float(pos.get("margin", pos.get("initial_margin", 0)) or 0)
+
+    leverage = pos.get("leverage")
+    if not leverage or leverage == "?":
+        try:
+            notional = entry_price * amount
+            leverage = round(notional / margin) if margin > 0 else 1
+        except Exception:
+            leverage = 1
 
     # Calculate PnL
     if side == "bid":
@@ -1060,7 +1068,25 @@ async def cb_exec_close(callback: CallbackQuery):
 
         direction = "LONG" if pos_side == "bid" else "SHORT"
 
-        # Send PnL card first (no menu — inline buttons don't work on photos)
+        # Calculate leverage from position data
+        leverage = pos.get("leverage")
+        if not leverage or leverage == "?":
+            try:
+                notional = entry_price * amount_f
+                if margin > 0:
+                    leverage = round(notional / margin)
+                else:
+                    leverage = 1
+            except Exception:
+                leverage = 1
+
+        # Delete the old confirmation message so everything flows top-down
+        try:
+            await callback.message.delete()  # type: ignore
+        except Exception:
+            pass
+
+        # Send PnL card (no menu)
         if close_price and entry_price:
             try:
                 from bot.services.pnl_card import generate_pnl_card
@@ -1074,14 +1100,15 @@ async def cb_exec_close(callback: CallbackQuery):
                     generate_pnl_card,
                     symbol=symbol, side=pos_side,
                     entry_price=entry_price, mark_price=close_price,
-                    amount=amount_f, leverage=pos.get("leverage", "?"),
+                    amount=amount_f, leverage=leverage,
                     pnl_usd=pnl, pnl_pct=pnl_pct,
                     username=user.get("username"),
                     ref_code=user.get("username") or user.get("ref_code"),
                 )
                 photo = BufferedInputFile(card_bytes, filename=f"pnl_{symbol}.png")
                 pnl_sign = "+" if pnl >= 0 else ""
-                await callback.message.answer_photo(  # type: ignore
+                await callback.bot.send_photo(  # type: ignore
+                    chat_id=tg_id,
                     photo=photo,
                     caption=(
                         f"{'🟢' if pnl >= 0 else '🔴'} {symbol} {direction} closed "
@@ -1092,13 +1119,16 @@ async def cb_exec_close(callback: CallbackQuery):
             except Exception as e:
                 logger.debug("PnL card generation failed: %s", e)
 
-        # Then show the close summary with working menu buttons
-        await callback.message.edit_text(  # type: ignore
-            f"<b>✅ Position Closed</b>\n\n"
-            f"{symbol} {direction} — size {amount}\n"
-            f"Entry: ${entry_price:,.2f}\n"
-            f"Close: ${close_price:,.2f}\n"
-            f"{pnl_line}",
+        # Send close summary with menu buttons AFTER the card
+        await callback.bot.send_message(  # type: ignore
+            chat_id=tg_id,
+            text=(
+                f"<b>✅ Position Closed</b>\n\n"
+                f"{symbol} {direction} {leverage}x — size {amount}\n"
+                f"Entry: ${entry_price:,.2f}\n"
+                f"Close: ${close_price:,.2f}\n"
+                f"{pnl_line}"
+            ),
             reply_markup=main_menu_kb(),
         )
     except PacificaAPIError as e:
