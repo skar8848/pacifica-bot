@@ -23,6 +23,9 @@ def build_client_from_user(user: dict) -> PacificaClient:
 
     keypair: Keypair = decrypt_private_key(user["agent_wallet_encrypted"])
 
+    # Only include builder code if the user has approved it
+    code = BUILDER_CODE if user.get("builder_approved") else ""
+
     # If agent_wallet_public is set and differs from pacifica_account,
     # we're using the agent wallet pattern (account + separate signer)
     agent_pub = user.get("agent_wallet_public")
@@ -31,7 +34,7 @@ def build_client_from_user(user: dict) -> PacificaClient:
             account=user["pacifica_account"],
             keypair=keypair,
             agent_wallet=agent_pub,
-            builder_code=BUILDER_CODE,
+            builder_code=code,
         )
 
     # Direct wallet: signing with the main wallet key, no agent
@@ -39,5 +42,5 @@ def build_client_from_user(user: dict) -> PacificaClient:
         account=user["pacifica_account"],
         keypair=keypair,
         agent_wallet=None,
-        builder_code=BUILDER_CODE,
+        builder_code=code,
     )
