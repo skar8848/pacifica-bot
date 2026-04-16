@@ -238,32 +238,68 @@ def mock_db():
 def patch_db(mock_db):
     """Patch all database.db functions with the mock_db equivalents.
 
+    Patches at BOTH the source module (database.db) AND every handler module
+    that uses ``from database.db import ...``, because Python binds the name
+    at import time.
+
     Returns the MockDB so tests can inspect state.
     """
-    patches = {
-        "database.db.get_user": mock_db.get_user,
-        "database.db.create_user": mock_db.create_user,
-        "database.db.update_user": mock_db.update_user,
-        "database.db.get_user_by_wallet": mock_db.get_user_by_wallet,
-        "database.db.get_or_create_ref_code": mock_db.get_or_create_ref_code,
-        "database.db.get_user_by_ref_code": mock_db.get_user_by_ref_code,
-        "database.db.count_referrals": mock_db.count_referrals,
-        "database.db.is_username_taken": mock_db.is_username_taken,
-        "database.db.get_user_settings": mock_db.get_user_settings,
-        "database.db.set_user_setting": mock_db.set_user_setting,
-        "database.db.log_trade": mock_db.log_trade,
-        "database.db.log_referral_fee": mock_db.log_referral_fee,
-        "database.db.get_referral_stats": mock_db.get_referral_stats,
-        "database.db.claim_referral_fees": mock_db.claim_referral_fees,
-        "database.db.get_active_alerts": mock_db.get_active_alerts,
-        "database.db.add_price_alert": mock_db.add_price_alert,
-        "database.db.delete_alert": mock_db.delete_alert,
+    # (function_name, mock_db_method) — maps db function names to mock methods
+    fn_map = {
+        "get_user": mock_db.get_user,
+        "create_user": mock_db.create_user,
+        "update_user": mock_db.update_user,
+        "get_user_by_wallet": mock_db.get_user_by_wallet,
+        "get_or_create_ref_code": mock_db.get_or_create_ref_code,
+        "get_user_by_ref_code": mock_db.get_user_by_ref_code,
+        "count_referrals": mock_db.count_referrals,
+        "is_username_taken": mock_db.is_username_taken,
+        "get_user_settings": mock_db.get_user_settings,
+        "set_user_setting": mock_db.set_user_setting,
+        "log_trade": mock_db.log_trade,
+        "log_referral_fee": mock_db.log_referral_fee,
+        "get_referral_stats": mock_db.get_referral_stats,
+        "claim_referral_fees": mock_db.claim_referral_fees,
+        "get_active_alerts": mock_db.get_active_alerts,
+        "add_price_alert": mock_db.add_price_alert,
+        "delete_alert": mock_db.delete_alert,
     }
+
+    # Modules that import db functions directly
+    handler_modules = [
+        "database.db",
+        "bot.handlers.start",
+        "bot.handlers.trading",
+        "bot.handlers.wallet",
+        "bot.handlers.portfolio",
+        "bot.handlers.copy_trade",
+    ]
+
     stack = []
-    for target, replacement in patches.items():
-        p = patch(target, side_effect=replacement)
-        stack.append(p)
-        p.start()
+    for fn_name, mock_fn in fn_map.items():
+        for mod in handler_modules:
+            target = f"{mod}.{fn_name}"
+            try:
+                p = patch(target, side_effect=mock_fn)
+                p.start()
+                stack.append(p)
+            except AttributeError:
+                pass  # this module doesn't import this function — skip
+
+    # Also patch the constants that are imported by value
+    for mod in handler_modules:
+        try:
+            p = patch(f"{mod}.REFERRAL_FEE_SHARE", 0.10)
+            p.start()
+            stack.append(p)
+        except AttributeError:
+            pass
+        try:
+            p = patch(f"{mod}.REFEREE_FEE_REBATE", 0.05)
+            p.start()
+            stack.append(p)
+        except AttributeError:
+            pass
 
     yield mock_db
 
@@ -384,19 +420,37 @@ def patch_market_data():
         lots = {"BTC": "0.001", "ETH": "0.01", "SOL": "0.1"}
         return lots.get(symbol, "0.01")
 
+    def mock_usd_to_token(usd_amount, price, lot_size="0.01"):
+        """Simplified version of usd_to_token for tests."""
+        import math
+        if price <= 0:
+            return "0"
+        raw = usd_amount / price
+        lot = float(lot_size)
+        rounded = math.floor(raw / lot) * lot
+        if lot >= 1:
+            return str(int(rounded))
+        decimals = len(lot_size.split(".")[-1]) if "." in lot_size else 0
+        return f"{rounded:.{decimals}f}"
+
     targets = {
+        # Source module
         "bot.services.market_data.get_price": mock_get_price,
         "bot.services.market_data.get_max_leverage": mock_get_max_leverage,
         "bot.services.market_data.get_market_info": mock_get_market_info,
         "bot.services.market_data.get_lot_size": mock_get_lot_size,
-        # Also patch the aliases used in trading.py
+        # Imports in trading.py (from ... import names)
         "bot.handlers.trading.get_price": mock_get_price,
         "bot.handlers.trading.get_max_leverage": mock_get_max_leverage,
         "bot.handlers.trading.get_market_info": mock_get_market_info,
         "bot.handlers.trading.get_lot_size": mock_get_lot_size,
-        "bot.handlers.trading.usd_to_token": lambda n, p, l="0.01": __import__(
-            "bot.services.market_data", fromlist=["usd_to_token"]
-        ).usd_to_token(n, p, l),
+        "bot.handlers.trading.usd_to_token": mock_usd_to_token,
+        # Module-level aliases (_get_price = get_price, etc.)
+        "bot.handlers.trading._get_price": mock_get_price,
+        "bot.handlers.trading._get_max_leverage": mock_get_max_leverage,
+        "bot.handlers.trading._get_market_info": mock_get_market_info,
+        "bot.handlers.trading._get_lot_size": mock_get_lot_size,
+        "bot.handlers.trading._usdc_to_token": mock_usd_to_token,
     }
 
     for target, fn in targets.items():
@@ -425,6 +479,12 @@ def patch_wallet():
         return_value=(fake_pub, fake_enc),
     ), patch(
         "bot.services.wallet_manager.import_wallet",
+        return_value=(fake_pub, fake_enc),
+    ), patch(
+        "bot.handlers.start.generate_wallet",
+        return_value=(fake_pub, fake_enc),
+    ), patch(
+        "bot.handlers.start.import_wallet",
         return_value=(fake_pub, fake_enc),
     ):
         yield fake_pub, fake_enc

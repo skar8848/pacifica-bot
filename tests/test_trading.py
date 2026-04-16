@@ -70,14 +70,16 @@ class TestSuccessfulTrade:
         mock_client = make_mock_pacifica_client(fill_price=50000.0, order_id="order-long-1")
         cb = make_callback(data="exec:bid:BTC:100:10", user_id=12345)
 
-        with patch("bot.models.user.build_client_from_user", return_value=mock_client), \
-             patch("bot.handlers.wallet.ensure_beta_and_builder", new_callable=AsyncMock):
+        with patch("bot.handlers.trading.build_client_from_user", return_value=mock_client), \
+             patch("bot.handlers.trading.ensure_beta_and_builder", new_callable=AsyncMock):
             await cb_execute_trade(cb)
 
         # Order should have been sent
         mock_client.create_market_order.assert_called_once()
         call_kwargs = mock_client.create_market_order.call_args
-        assert call_kwargs.kwargs["symbol"] == "BTC" or call_kwargs[1]["symbol"] == "BTC"
+        # Check symbol in either positional or keyword args
+        all_kwargs = call_kwargs.kwargs if call_kwargs.kwargs else {}
+        assert all_kwargs.get("symbol") == "BTC"
 
         # Should show success message
         cb.message.edit_text.assert_called_once()
@@ -100,8 +102,8 @@ class TestSuccessfulTrade:
         mock_client = make_mock_pacifica_client(fill_price=3000.0, order_id="order-short-1")
         cb = make_callback(data="exec:ask:ETH:50:5", user_id=22222)
 
-        with patch("bot.models.user.build_client_from_user", return_value=mock_client), \
-             patch("bot.handlers.wallet.ensure_beta_and_builder", new_callable=AsyncMock):
+        with patch("bot.handlers.trading.build_client_from_user", return_value=mock_client), \
+             patch("bot.handlers.trading.ensure_beta_and_builder", new_callable=AsyncMock):
             await cb_execute_trade(cb)
 
         mock_client.create_market_order.assert_called_once()
@@ -127,12 +129,12 @@ class TestSuccessfulTrade:
         mock_client = make_mock_pacifica_client()
         cb = make_callback(data="exec:bid:SOL:200:5", user_id=33333)
 
-        with patch("bot.models.user.build_client_from_user", return_value=mock_client), \
-             patch("bot.handlers.wallet.ensure_beta_and_builder", new_callable=AsyncMock):
+        with patch("bot.handlers.trading.build_client_from_user", return_value=mock_client), \
+             patch("bot.handlers.trading.ensure_beta_and_builder", new_callable=AsyncMock):
             await cb_execute_trade(cb)
 
         call_kwargs = mock_client.create_market_order.call_args
-        # slippage should be "1.0"
+        assert call_kwargs is not None, "create_market_order was not called"
         all_kwargs = call_kwargs.kwargs if call_kwargs.kwargs else {}
         if "slippage" in all_kwargs:
             assert all_kwargs["slippage"] == "1.0"
@@ -159,8 +161,8 @@ class TestTradeErrors:
         )
         cb = make_callback(data="exec:bid:BTC:1000:10", user_id=44444)
 
-        with patch("bot.models.user.build_client_from_user", return_value=mock_client), \
-             patch("bot.handlers.wallet.ensure_beta_and_builder", new_callable=AsyncMock):
+        with patch("bot.handlers.trading.build_client_from_user", return_value=mock_client), \
+             patch("bot.handlers.trading.ensure_beta_and_builder", new_callable=AsyncMock):
             await cb_execute_trade(cb)
 
         cb.message.edit_text.assert_called_once()
@@ -183,7 +185,7 @@ class TestTradeErrors:
             return None
 
         with patch("bot.handlers.trading.get_price", side_effect=no_price), \
-             patch("bot.handlers.wallet.ensure_beta_and_builder", new_callable=AsyncMock):
+             patch("bot.handlers.trading.ensure_beta_and_builder", new_callable=AsyncMock):
             await cb_execute_trade(cb)
 
         cb.message.edit_text.assert_called_once()
@@ -248,8 +250,8 @@ class TestReferralFeeTracking:
         mock_client = make_mock_pacifica_client(fill_price=50000.0)
         cb = make_callback(data="exec:bid:BTC:100:10", user_id=7001)
 
-        with patch("bot.models.user.build_client_from_user", return_value=mock_client), \
-             patch("bot.handlers.wallet.ensure_beta_and_builder", new_callable=AsyncMock):
+        with patch("bot.handlers.trading.build_client_from_user", return_value=mock_client), \
+             patch("bot.handlers.trading.ensure_beta_and_builder", new_callable=AsyncMock):
             await cb_execute_trade(cb)
 
         # Should have a trade log entry
@@ -276,8 +278,8 @@ class TestReferralFeeTracking:
         mock_client = make_mock_pacifica_client()
         cb = make_callback(data="exec:bid:BTC:100:10", user_id=8000)
 
-        with patch("bot.models.user.build_client_from_user", return_value=mock_client), \
-             patch("bot.handlers.wallet.ensure_beta_and_builder", new_callable=AsyncMock):
+        with patch("bot.handlers.trading.build_client_from_user", return_value=mock_client), \
+             patch("bot.handlers.trading.ensure_beta_and_builder", new_callable=AsyncMock):
             await cb_execute_trade(cb)
 
         assert len(patch_db.trade_log) == 1
