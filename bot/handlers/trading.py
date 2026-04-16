@@ -902,7 +902,8 @@ async def cb_share_pnl(callback: CallbackQuery):
         f"Trade on @trident_pacifica_bot"
     )
 
-    await callback.message.answer_photo(photo=photo, caption=caption, reply_markup=main_menu_kb())  # type: ignore
+    await callback.message.answer_photo(photo=photo, caption=caption)  # type: ignore
+    await callback.message.answer("What next?", reply_markup=main_menu_kb())  # type: ignore
 
 
 @router.callback_query(F.data.startswith("pclose:"))
@@ -1058,25 +1059,19 @@ async def cb_exec_close(callback: CallbackQuery):
         await log_trade(tg_id, symbol, close_side, amount, order_type="market_close")
 
         direction = "LONG" if pos_side == "bid" else "SHORT"
-        await callback.message.edit_text(  # type: ignore
-            f"<b>✅ Position Closed</b>\n\n"
-            f"{symbol} {direction} — size {amount}\n"
-            f"Entry: ${entry_price:,.2f}\n"
-            f"Close: ${close_price:,.2f}\n"
-            f"{pnl_line}",
-            reply_markup=main_menu_kb(),
-        )
 
-        # Auto-generate PnL share card on close
+        # Send PnL card first (no menu — inline buttons don't work on photos)
         if close_price and entry_price:
             try:
                 from bot.services.pnl_card import generate_pnl_card
                 from aiogram.types import BufferedInputFile
+                import asyncio
 
                 cost_basis = entry_price * amount_f
                 pnl_pct = (pnl / cost_basis * 100) if cost_basis else 0
 
-                card_bytes = generate_pnl_card(
+                card_bytes = await asyncio.to_thread(
+                    generate_pnl_card,
                     symbol=symbol, side=pos_side,
                     entry_price=entry_price, mark_price=close_price,
                     amount=amount_f, leverage=pos.get("leverage", "?"),
@@ -1093,10 +1088,19 @@ async def cb_exec_close(callback: CallbackQuery):
                         f"| {pnl_sign}${pnl:,.2f} ({pnl_sign}{pnl_pct:.1f}%)\n\n"
                         f"Trade on @trident_pacifica_bot"
                     ),
-                    reply_markup=main_menu_kb(),
                 )
             except Exception as e:
                 logger.debug("PnL card generation failed: %s", e)
+
+        # Then show the close summary with working menu buttons
+        await callback.message.edit_text(  # type: ignore
+            f"<b>✅ Position Closed</b>\n\n"
+            f"{symbol} {direction} — size {amount}\n"
+            f"Entry: ${entry_price:,.2f}\n"
+            f"Close: ${close_price:,.2f}\n"
+            f"{pnl_line}",
+            reply_markup=main_menu_kb(),
+        )
     except PacificaAPIError as e:
         await callback.message.edit_text(  # type: ignore
             f"<b>❌ Close Failed</b>\n\n{e}", reply_markup=back_to_menu_kb(),
