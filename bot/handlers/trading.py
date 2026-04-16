@@ -1272,13 +1272,23 @@ async def msg_tp_price(message: Message, state: FSMContext):
             await client.close()
             return
 
-        await client.set_tpsl(symbol=symbol, side=pos["side"], take_profit={"stop_price": price})
+        pos_side = pos.get("side", "")
+        # Pacifica may return long/short/buy/sell — normalize to bid/ask
+        if pos_side.lower() in ("long", "buy", "bid"):
+            normalized = "bid"
+        elif pos_side.lower() in ("short", "sell", "ask"):
+            normalized = "ask"
+        else:
+            normalized = pos_side
+        logger.info("TP set: symbol=%s pos_side=%s normalized=%s price=%s", symbol, pos_side, normalized, price)
+        await client.set_tpsl(symbol=symbol, side=normalized, take_profit={"stop_price": str(price)})
         await client.close()
         await message.answer(
             f"<b>✅ Take Profit set</b>\n{symbol} TP @ ${price}",
             reply_markup=main_menu_kb(),
         )
     except Exception as e:
+        logger.error("TP set error: %s", e)
         await message.answer(f"Error: {e}", reply_markup=back_to_menu_kb())
 
 
@@ -1315,13 +1325,22 @@ async def msg_sl_price(message: Message, state: FSMContext):
             await client.close()
             return
 
-        await client.set_tpsl(symbol=symbol, side=pos["side"], stop_loss={"stop_price": price})
+        pos_side = pos.get("side", "")
+        if pos_side.lower() in ("long", "buy", "bid"):
+            normalized = "bid"
+        elif pos_side.lower() in ("short", "sell", "ask"):
+            normalized = "ask"
+        else:
+            normalized = pos_side
+        logger.info("SL set: symbol=%s pos_side=%s normalized=%s price=%s", symbol, pos_side, normalized, price)
+        await client.set_tpsl(symbol=symbol, side=normalized, stop_loss={"stop_price": str(price)})
         await client.close()
         await message.answer(
             f"<b>✅ Stop Loss set</b>\n{symbol} SL @ ${price}",
             reply_markup=main_menu_kb(),
         )
     except Exception as e:
+        logger.error("SL set error: %s", e)
         await message.answer(f"Error: {e}", reply_markup=back_to_menu_kb())
 
 

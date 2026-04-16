@@ -220,10 +220,14 @@ class PacificaClient:
         take_profit: dict | None = None,
         stop_loss: dict | None = None,
     ) -> dict:
+        """Set TP/SL. `side` is the POSITION side (bid=long, ask=short).
+        The API wants the stop order side (opposite of position)."""
         header = self._make_header("set_position_tpsl")
+        # Invert: position bid → stop order ask, position ask → stop order bid
+        order_side = "ask" if self._normalize_side(side) == "bid" else "bid"
         payload: dict[str, Any] = {
             "symbol": symbol,
-            "side": side,
+            "side": order_side,
         }
         if self.builder_code:
             payload["builder_code"] = self.builder_code
