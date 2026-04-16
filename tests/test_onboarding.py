@@ -417,11 +417,11 @@ class TestUsernameValidation:
         # Ref code should be generated
         assert patch_db.users[1500]["ref_code"] is not None
 
-        # FSM state should be cleared
+        # FSM state should transition to referral prompt (or be cleared if already referred)
         current = await state.get_state()
-        assert current is None
+        assert current is None or "waiting_referral" in str(current)
 
-        # Welcome message should contain the username
+        # Welcome/referral message should contain the username
         msg.answer.assert_called_once()
         text = msg.answer.call_args[0][0]
         assert "trader_one" in text

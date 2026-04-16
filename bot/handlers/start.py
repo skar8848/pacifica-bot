@@ -67,6 +67,11 @@ class ReferralStates(StatesGroup):
     waiting_username = State()
 
 
+class PostOnboardStates(StatesGroup):
+    waiting_referral = State()
+    waiting_deposit = State()
+
+
 # ------------------------------------------------------------------
 # /start
 # ------------------------------------------------------------------
@@ -393,7 +398,6 @@ async def msg_onboard_username(message: Message, state: FSMContext):
         return
 
     await update_user(tg_id, username=raw)
-    await state.clear()
 
     # Generate referral code based on username
     await get_or_create_ref_code(tg_id)
@@ -401,28 +405,82 @@ async def msg_onboard_username(message: Message, state: FSMContext):
     user = await get_user(tg_id)
     wallet = user["pacifica_account"] if user else "?"
 
-    if PACIFICA_NETWORK != "mainnet":
-        setup_note = (
-            "\n\n⏳ <b>Please wait ~10 seconds</b> — your wallet is being set up.\n"
-            "SOL + USDC are being sent automatically."
-        )
+    # Check if referral was already set via deeplink
+    fsm_data = await state.get_data()
+    already_referred = user.get("referred_by") or fsm_data.get("ref_code")
+
+    if already_referred:
+        # Skip referral question, go straight to deposit step
+        await state.clear()
+        await _show_deposit_step(message, raw, wallet)
     else:
-        setup_note = (
-            "\n\n<b>To start trading:</b>\n"
-            "1. Send <b>USDC</b> (Solana) to your wallet address above\n"
-            "2. Tap 💳 <b>Wallet → Deposit</b> to move USDC into Pacifica\n"
-            "3. You're ready to trade!\n\n"
-            "You also need a small amount of <b>SOL</b> (~0.01) for transaction fees."
+        # Ask if they have a referral code
+        await state.set_state(PostOnboardStates.waiting_referral)
+        from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+        await message.answer(
+            f"<b>Welcome @{raw}!</b>\n\n"
+            f"Do you have a referral code?\n"
+            f"You'll get a <b>5% fee discount</b> on all trades.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="No, skip", callback_data="ref:skip")],
+            ]),
         )
 
-    ref_link = f"https://t.me/{BOT_USERNAME}?start=ref_{raw}"
-    await message.answer(
-        f"<b>Welcome @{raw}!</b>\n\n"
-        f"Wallet: <code>{wallet[:8]}...{wallet[-4:]}</code>\n"
-        f"Referral link: <code>{ref_link}</code>"
-        f"{setup_note}",
-        reply_markup=main_menu_kb(),
+
+@router.callback_query(F.data == "ref:skip")
+async def cb_ref_skip(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await state.clear()
+    tg_id = callback.from_user.id
+    user = await get_user(tg_id)
+    if not user:
+        return
+    wallet = user.get("pacifica_account", "?")
+    username = user.get("username", "trader")
+    await callback.message.delete()  # type: ignore
+    await _show_deposit_step(callback.message, username, wallet, bot=callback.bot, chat_id=tg_id)  # type: ignore
+
+
+@router.message(PostOnboardStates.waiting_referral, F.text, ~F.text.startswith("/"))
+async def msg_post_onboard_referral(message: Message, state: FSMContext):
+    """User typed a referral code after onboarding."""
+    raw = (message.text or "").strip().lstrip("@")
+    tg_id = message.from_user.id  # type: ignore
+
+    referrer = await get_user_by_ref_code(raw)
+    if referrer and referrer["telegram_id"] != tg_id:
+        await update_user(tg_id, referred_by=referrer["telegram_id"])
+        ref_name = referrer.get("username", "someone")
+        await message.answer(f"✅ Referred by <b>@{ref_name}</b> — you get 5% fee discount!")
+    elif not referrer:
+        await message.answer("Code not found, but no worries — you can add one later.")
+    else:
+        await message.answer("You can't refer yourself!")
+
+    await state.clear()
+    user = await get_user(tg_id)
+    wallet = user.get("pacifica_account", "?") if user else "?"
+    username = user.get("username", "trader") if user else "trader"
+    await _show_deposit_step(message, username, wallet)
+
+
+async def _show_deposit_step(message, username: str, wallet: str, bot=None, chat_id=None):
+    """Show deposit instructions. Funds are being sent in background."""
+    send = message.answer if bot is None else lambda text, **kw: bot.send_message(chat_id, text, **kw)
+
+    await send(
+        f"⏳ <b>Setting up your wallet...</b>\n\n"
+        f"SOL + USDC are being sent to your wallet automatically.\n"
+        f"This takes ~10 seconds.\n\n"
+        f"<b>Next step:</b> Tap the button below to deposit USDC into Pacifica.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="💳 Deposit to Pacifica", callback_data="wallet:deposit")],
+            [InlineKeyboardButton(text="Skip → Main Menu", callback_data="nav:menu")],
+        ]),
     )
+
+
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 
 # ------------------------------------------------------------------
