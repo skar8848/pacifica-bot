@@ -401,8 +401,10 @@ async def copy_masters(callback: CallbackQuery):
         return
 
     text = "<b>👥 My Masters</b>\n\n"
+    rows = []
     for cfg in configs:
         w = cfg["master_wallet"]
+        short = f"{w[:6]}...{w[-4:]}"
         mode = cfg.get("sizing_mode", "proportional")
         if mode == "fixed_usd":
             size = f"${cfg.get('fixed_amount_usd', 10):.0f}/trade"
@@ -411,11 +413,19 @@ async def copy_masters(callback: CallbackQuery):
         else:
             size = f"{cfg['size_multiplier']}x"
         text += (
-            f"<code>{w[:8]}...{w[-4:]}</code>\n"
-            f"  {size} | Cap ${cfg['max_position_usd']:,.0f}\n"
-            f"  /unfollow <code>{w}</code>\n\n"
+            f"{short} — {size} | Cap ${cfg['max_position_usd']:,.0f}\n\n"
         )
-    await callback.message.edit_text(text, reply_markup=copy_menu_kb())  # type: ignore
+        rows.append([
+            InlineKeyboardButton(text=f"🔍 {short}", callback_data=f"inspect:{w}"),
+            InlineKeyboardButton(text=f"❌ Unfollow", callback_data=f"unfollow_ask:{w}"),
+        ])
+
+    rows.append([
+        InlineKeyboardButton(text="➕ Copy a Wallet", callback_data="copy:add"),
+        InlineKeyboardButton(text="◀️ Menu", callback_data="nav:menu"),
+    ])
+    kb = InlineKeyboardMarkup(inline_keyboard=rows)
+    await callback.message.edit_text(text, reply_markup=kb)  # type: ignore
 
 
 @router.callback_query(F.data == "copy:log")
@@ -652,6 +662,40 @@ async def copy_start_callback(callback: CallbackQuery):
 # /unfollow, /masters, /copylog
 # ------------------------------------------------------------------
 
+@router.callback_query(F.data.startswith("unfollow_ask:"))
+async def cb_unfollow_ask(callback: CallbackQuery):
+    wallet = callback.data.split(":", 1)[1]  # type: ignore
+    short = f"{wallet[:6]}...{wallet[-4:]}"
+    await callback.answer()
+    await callback.message.edit_text(  # type: ignore
+        f"<b>Stop copying {short}?</b>\n\n"
+        f"This will stop replicating new trades from this master.\n"
+        f"Your existing copied positions will stay open.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(text="✅ Yes, unfollow", callback_data=f"unfollow_yes:{wallet}"),
+                InlineKeyboardButton(text="◀️ Cancel", callback_data="copy:masters"),
+            ],
+        ]),
+    )
+
+
+@router.callback_query(F.data.startswith("unfollow_yes:"))
+async def cb_unfollow_yes(callback: CallbackQuery):
+    wallet = callback.data.split(":", 1)[1]  # type: ignore
+    tg_id = callback.from_user.id
+    await callback.answer()
+    await deactivate_copy_config(tg_id, wallet)
+    # Clear the snapshot so re-following won't replay old positions
+    from bot.services.copy_engine import _master_snapshots
+    _master_snapshots.pop(wallet, None)
+    short = f"{wallet[:6]}...{wallet[-4:]}"
+    await callback.message.edit_text(  # type: ignore
+        f"✅ Stopped copying <b>{short}</b>",
+        reply_markup=copy_menu_kb(),
+    )
+
+
 @router.message(Command("unfollow"))
 async def cmd_unfollow(message: Message):
     args = (message.text or "").split()
@@ -661,7 +705,9 @@ async def cmd_unfollow(message: Message):
     wallet = args[1]
     tg_id = message.from_user.id  # type: ignore
     await deactivate_copy_config(tg_id, wallet)
-    await message.answer(f"Stopped copying <code>{wallet}</code>", reply_markup=copy_menu_kb())
+    from bot.services.copy_engine import _master_snapshots
+    _master_snapshots.pop(wallet, None)
+    await message.answer(f"✅ Stopped copying <code>{wallet}</code>", reply_markup=copy_menu_kb())
 
 
 @router.message(Command("masters"))
